@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import signal
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from .app import PlatexApp
 from .clipboard import copy_text_to_clipboard
 from .history import HistoryStore
+from .models import ClipboardEvent
 
 
 def _load_pystray():
@@ -40,6 +43,44 @@ class TrayController:
     def run(self) -> int:
         logger = logging.getLogger("platex.tray")
         pystray, Menu, MenuItem = _load_pystray()
+        previous_sigint_handler = signal.getsignal(signal.SIGINT)
+
+        def show_fallback_popup(title: str, message: str, timeout_ms: int = 3200) -> None:
+            def worker() -> None:
+                try:
+                    import tkinter as tk
+
+                    root = tk.Tk()
+                    root.title(title)
+                    root.attributes("-topmost", True)
+                    root.resizable(False, False)
+
+                    # Place near bottom-right corner like a toast.
+                    root.update_idletasks()
+                    width = 520
+                    height = 120
+                    x = max(0, root.winfo_screenwidth() - width - 24)
+                    y = max(0, root.winfo_screenheight() - height - 72)
+                    root.geometry(f"{width}x{height}+{x}+{y}")
+
+                    frame = tk.Frame(root, padx=12, pady=10)
+                    frame.pack(fill="both", expand=True)
+                    tk.Label(frame, text=title, font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x")
+                    tk.Label(
+                        frame,
+                        text=message,
+                        justify="left",
+                        anchor="w",
+                        wraplength=490,
+                        font=("Segoe UI", 10),
+                    ).pack(fill="both", expand=True, pady=(6, 0))
+
+                    root.after(timeout_ms, root.destroy)
+                    root.mainloop()
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Fallback popup failed: %s", exc)
+
+            threading.Thread(target=worker, name="platex-toast-popup", daemon=True).start()
 
         def show_status() -> str:
             latest = self.history.latest()
@@ -59,6 +100,17 @@ class TrayController:
             else:
                 logger.warning("Manual OCR once failed: %s", event.error)
             icon.title = show_status()
+
+        def notify_success(event: ClipboardEvent) -> None:
+            preview = event.latex.replace("\n", " ").strip()
+            if len(preview) > 120:
+                preview = preview[:117] + "..."
+            if not preview:
+                preview = "OCR completed"
+
+            # Show exactly one visible popup for OCR success.
+            show_fallback_popup("PLatex OCR Success", preview)
+            logger.info("OCR success popup emitted hash=%s", event.image_hash[:10])
 
         def copy_latest(_icon, _item) -> None:
             latest = self.history.latest()
@@ -82,13 +134,19 @@ class TrayController:
             MenuItem("Exit", quit_app),
         )
         icon = pystray.Icon("PLatexClient", _build_icon_image(), show_status(), menu)
+        self.app.on_ocr_success = notify_success
         self.app.start()
         try:
+            # In console-launched tray mode, Ctrl+C can bubble into pystray Win32 callbacks
+            # and print noisy "Exception ignored on calling ctypes callback" traces.
+            # Ignore SIGINT and let users exit from tray menu for a clean shutdown.
+            signal.signal(signal.SIGINT, signal.SIG_IGN)
             icon.run()
         except KeyboardInterrupt:
             logger.info("Tray interrupted by keyboard")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error in tray main loop: %s", exc)
         finally:
+            signal.signal(signal.SIGINT, previous_sigint_handler)
             self.app.stop()
         return 0

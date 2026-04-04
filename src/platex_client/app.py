@@ -3,11 +3,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .history import HistoryStore
 from .loader import load_script_processor
+from .models import ClipboardEvent
 from .watcher import ClipboardWatcher
 from .windows_clipboard import publish_text_to_clipboard
 
@@ -20,6 +22,7 @@ class PlatexApp:
     publish_latex: bool = False
     isolate_mode: bool = False
     restore_delay: float = 0.25
+    on_ocr_success: Callable[[ClipboardEvent], None] | None = None
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _worker: threading.Thread | None = field(default=None, init=False, repr=False)
     _watcher: ClipboardWatcher | None = field(default=None, init=False, repr=False)
@@ -53,7 +56,9 @@ class PlatexApp:
         def run() -> None:
             while not self._stop_event.is_set():
                 try:
-                    watcher.poll_once()
+                    event = watcher.poll_once()
+                    if event is not None and event.status == "ok" and self.on_ocr_success is not None:
+                        self.on_ocr_success(event)
                 except Exception as exc:  # noqa: BLE001
                     self.logger.exception("Error in clipboard poll loop: %s", exc)
                 self._stop_event.wait(self.interval)
@@ -63,7 +68,10 @@ class PlatexApp:
 
     def run_once(self):
         watcher = self._ensure_watcher()
-        return watcher.poll_once()
+        event = watcher.poll_once()
+        if event is not None and event.status == "ok" and self.on_ocr_success is not None:
+            self.on_ocr_success(event)
+        return event
 
     def stop(self) -> None:
         self.logger.info("Stopping background watcher")

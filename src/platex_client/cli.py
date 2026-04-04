@@ -77,6 +77,26 @@ def _acquire_single_instance_lock() -> bool:
     return True
 
 
+def _release_single_instance_lock() -> None:
+    global _INSTANCE_LOCK_HANDLE
+    if _INSTANCE_LOCK_HANDLE is None:
+        return
+
+    handle = _INSTANCE_LOCK_HANDLE
+    _INSTANCE_LOCK_HANDLE = None
+    try:
+        if sys.platform == "win32":
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="platex-client", description="Clipboard watcher for OCR to LaTeX.")
     parser.add_argument("--config", type=Path, default=None, help=f"Optional YAML config path. Default: {default_config_path()}")
@@ -169,21 +189,24 @@ def _tray(args: argparse.Namespace) -> int:
         print("PLatex tray is already running. Please exit the existing tray instance first.")
         return 1
 
-    runtime = _resolve_runtime_config(args)
-    setup_logging(runtime["log_file"])
-    app = PlatexApp(
-        db_path=runtime["db_path"],
-        script_path=runtime["script"],
-        interval=runtime["interval"],
-        publish_latex=runtime["publish_latex"],
-        isolate_mode=runtime["isolate_mode"],
-        restore_delay=runtime["restore_delay"],
-    )
-    history = HistoryStore(runtime["db_path"])
-    controller = TrayController(app=app, history=history)
-    print(f"Starting tray mode. Mounted script: {runtime['script']}")
-    print(f"Logging to: {runtime['log_file']}")
-    return controller.run()
+    try:
+        runtime = _resolve_runtime_config(args)
+        setup_logging(runtime["log_file"])
+        app = PlatexApp(
+            db_path=runtime["db_path"],
+            script_path=runtime["script"],
+            interval=runtime["interval"],
+            publish_latex=runtime["publish_latex"],
+            isolate_mode=runtime["isolate_mode"],
+            restore_delay=runtime["restore_delay"],
+        )
+        history = HistoryStore(runtime["db_path"])
+        controller = TrayController(app=app, history=history)
+        print(f"Starting tray mode. Mounted script: {runtime['script']}")
+        print(f"Logging to: {runtime['log_file']}")
+        return controller.run()
+    finally:
+        _release_single_instance_lock()
 
 
 def _print_history(history: HistoryStore, limit: int) -> int:
