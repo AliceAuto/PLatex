@@ -10,9 +10,8 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\PLatexClient
-DefaultGroupName=PLatex Client
 DisableDirPage=no
-DisableProgramGroupPage=no
+DisableProgramGroupPage=yes
 OutputDir=dist\installer
 OutputBaseFilename=PLatexClient-0.1.0-win64-setup
 Compression=lzma2
@@ -22,19 +21,8 @@ PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
-[Tasks]
-Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
-
 [Files]
 Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "scripts\{#MyAppScriptName}"; DestDir: "{app}\scripts"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.example.yaml"; DestDir: "{app}"; Flags: ignoreversion
-
-[Icons]
-Name: "{group}\PLatex Client"; Filename: "{app}\{#MyAppExeName}"
-Name: "{commondesktop}\PLatex Client"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
-Name: "{group}\Uninstall PLatex Client"; Filename: "{uninstallexe}"
-
-[Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch PLatex Client"; Flags: nowait postinstall skipifsilent
