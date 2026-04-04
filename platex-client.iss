@@ -22,7 +22,6 @@ ArchitecturesInstallIn64BitMode=x64
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "scripts\{#MyAppScriptName}"; DestDir: "{app}\scripts"; Flags: ignoreversion
+Source: "dist\platex-client\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "config.example.yaml"; DestDir: "{app}"; Flags: ignoreversion

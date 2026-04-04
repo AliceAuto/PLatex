@@ -19,6 +19,26 @@ _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
 _clipboard_lock = threading.Lock()
 
+_user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+_user32.OpenClipboard.restype = ctypes.c_bool
+_user32.CloseClipboard.argtypes = []
+_user32.CloseClipboard.restype = ctypes.c_bool
+_user32.EmptyClipboard.argtypes = []
+_user32.EmptyClipboard.restype = ctypes.c_bool
+_user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+_user32.SetClipboardData.restype = ctypes.c_void_p
+_user32.GetClipboardData.argtypes = [ctypes.c_uint]
+_user32.GetClipboardData.restype = ctypes.c_void_p
+
+_kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+_kernel32.GlobalAlloc.restype = ctypes.c_void_p
+_kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+_kernel32.GlobalLock.restype = ctypes.c_void_p
+_kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+_kernel32.GlobalUnlock.restype = ctypes.c_bool
+_kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+_kernel32.GlobalFree.restype = ctypes.c_void_p
+
 
 @contextmanager
 def _open_clipboard():
@@ -89,30 +109,6 @@ def _read_text_ctypes() -> str:
                 _kernel32.GlobalUnlock(handle)
 
 
-def _set_text_tkinter(text: str) -> None:
-    """Set text to Windows clipboard using tkinter (most reliable pure-Python method)."""
-    import tkinter as tk
-    
-    root = tk.Tk()
-    root.withdraw()  # Hide the window
-    
-    try:
-        root.clipboard_clear()
-        root.update()  # Process pending events
-        time.sleep(0.01)  # Brief pause for clipboard state to settle
-        
-        root.clipboard_append(text)
-        root.update()  # Ensure clipboard operation is processed
-        time.sleep(0.03)  # Give Windows a small window to commit the data
-        
-        logger.info("tkinter Set-Clipboard succeeded")
-    finally:
-        try:
-            root.destroy()
-        except:
-            pass
-
-
 def _set_text_with_retry(text: str) -> None:
     last_error: Exception | None = None
 
@@ -139,29 +135,6 @@ def _set_text_with_retry(text: str) -> None:
             )
             time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
 
-    for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
-        try:
-            _set_text_tkinter(text)
-            verify_error: Exception | None = None
-            for verify_attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
-                try:
-                    time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * verify_attempt)
-                    if _read_text_ctypes() == text:
-                        return
-                except Exception as exc:  # noqa: BLE001
-                    verify_error = exc
-                    continue
-            raise RuntimeError("Clipboard verification failed after tkinter write") from verify_error
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            logger.debug(
-                "tkinter clipboard write attempt %s/%s failed: %s",
-                attempt,
-                _MAX_CLIPBOARD_ATTEMPTS,
-                exc,
-            )
-            time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
-
     raise RuntimeError("Unable to write text to clipboard after retries") from last_error
 
 
@@ -171,3 +144,10 @@ def set_text(text: str) -> None:
     except Exception as exc:
         logger.exception("Unable to write text to Windows clipboard after retries: %s", exc)
         raise
+
+
+def get_text() -> str | None:
+    try:
+        return _read_text_ctypes()
+    except Exception:
+        return None
