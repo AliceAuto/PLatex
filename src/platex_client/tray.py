@@ -197,14 +197,11 @@ class TrayController:
                 from PyQt6.QtCore import QTimer, Qt
                 from PyQt6.QtWidgets import (
                     QApplication,
-                    QCheckBox,
-                    QFileDialog,
                     QHBoxLayout,
                     QLabel,
-                    QLineEdit,
                     QMessageBox,
+                    QPlainTextEdit,
                     QPushButton,
-                    QDoubleSpinBox,
                     QVBoxLayout,
                     QWidget,
                 )
@@ -307,50 +304,11 @@ class TrayController:
                     root.setContentsMargins(14, 14, 14, 14)
                     root.setSpacing(10)
 
-                    self.auto_start = QCheckBox("开机自启")
-                    self.auto_start.setChecked(_is_startup_enabled() or bool(private_cfg.get("auto_start", False)))
-                    root.addWidget(self.auto_start)
-
-                    root.addWidget(QLabel("数据库路径（db_path）"))
-                    self.db_path = QLineEdit(str(private_cfg.get("db_path", "")))
-                    root.addWidget(self.db_path)
-
-                    root.addWidget(QLabel("当前挂载脚本"))
-                    script_row = QHBoxLayout()
-                    self.active_script = QLineEdit(str(controller.app.script_path))
-                    btn_browse_active = QPushButton("浏览")
-                    script_row.addWidget(self.active_script)
-                    script_row.addWidget(btn_browse_active)
-                    root.addLayout(script_row)
-
-                    root.addWidget(QLabel("日志路径（log_file）"))
-                    self.log_file = QLineEdit(str(private_cfg.get("log_file", "")))
-                    root.addWidget(self.log_file)
-
-                    interval_row = QHBoxLayout()
-                    interval_row.addWidget(QLabel("轮询间隔（interval）"))
-                    self.interval = QDoubleSpinBox()
-                    self.interval.setRange(0.1, 10.0)
-                    self.interval.setSingleStep(0.1)
-                    self.interval.setValue(float(private_cfg.get("interval", 0.8)))
-                    interval_row.addWidget(self.interval)
-                    root.addLayout(interval_row)
-
-                    self.isolate_mode = QCheckBox("强隔离模式（isolate_mode）")
-                    self.isolate_mode.setChecked(bool(private_cfg.get("isolate_mode", False)))
-                    root.addWidget(self.isolate_mode)
-
-                    root.addWidget(QLabel("GLM API Key（glm_api_key）"))
-                    self.glm_api_key = QLineEdit(str(private_cfg.get("glm_api_key", "")))
-                    root.addWidget(self.glm_api_key)
-
-                    root.addWidget(QLabel("GLM Model（glm_model）"))
-                    self.glm_model = QLineEdit(str(private_cfg.get("glm_model", "")))
-                    root.addWidget(self.glm_model)
-
-                    root.addWidget(QLabel("GLM Base URL（glm_base_url）"))
-                    self.glm_base_url = QLineEdit(str(private_cfg.get("glm_base_url", "")))
-                    root.addWidget(self.glm_base_url)
+                    root.addWidget(QLabel("配置文件（完整 YAML，可滚动编辑）"))
+                    self.yaml_editor = QPlainTextEdit()
+                    self.yaml_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+                    self.yaml_editor.setPlainText(self._load_yaml_text())
+                    root.addWidget(self.yaml_editor)
 
                     action_row = QHBoxLayout()
                     btn_save = QPushButton("保存并应用")
@@ -361,73 +319,108 @@ class TrayController:
                     action_row.addWidget(btn_close)
                     root.addLayout(action_row)
 
-                    def _browse_target(line_edit: QLineEdit) -> None:
-                        path, _ = QFileDialog.getOpenFileName(self, "选择脚本", str(Path(line_edit.text() or Path.cwd()).parent), "Python (*.py)")
-                        if path:
-                            line_edit.setText(path)
-
-                    def _save_apply() -> None:
-                        chosen = Path(self.active_script.text().strip())
-                        if not chosen.exists():
-                            QMessageBox.warning(self, "路径无效", "当前挂载脚本不存在，请重新选择。")
-                            return
-
-                        try:
-                            _set_startup_enabled(self.auto_start.isChecked())
-                        except Exception as exc:  # noqa: BLE001
-                            QMessageBox.warning(self, "开机自启失败", str(exc))
-                            return
-
-                        payload = {
-                            "auto_start": bool(self.auto_start.isChecked()),
-                            "db_path": self.db_path.text().strip(),
-                            "script": str(chosen),
-                            "log_file": self.log_file.text().strip(),
-                            "interval": float(self.interval.value()),
-                            "isolate_mode": bool(self.isolate_mode.isChecked()),
-                            "glm_api_key": self.glm_api_key.text().strip(),
-                            "glm_model": self.glm_model.text().strip(),
-                            "glm_base_url": self.glm_base_url.text().strip(),
-                        }
-                        try:
-                            _save_panel_config(payload)
-                        except Exception as exc:  # noqa: BLE001
-                            QMessageBox.warning(self, "保存失败", str(exc))
-                            return
-
-                        if payload["glm_api_key"]:
-                            os.environ["GLM_API_KEY"] = str(payload["glm_api_key"])
-                        if payload["glm_model"]:
-                            os.environ["GLM_MODEL"] = str(payload["glm_model"])
-                        if payload["glm_base_url"]:
-                            os.environ["GLM_BASE_URL"] = str(payload["glm_base_url"])
-
-                        try:
-                            was_running = controller.app._worker is not None and controller.app._worker.is_alive()
-                            controller.app.stop()
-                            controller.app.script_path = chosen
-                            controller.app.interval = float(payload["interval"])
-                            controller.app.isolate_mode = bool(payload["isolate_mode"])
-                            controller.app._watcher = None
-                            controller.app._stop_event.clear()
-                            if was_running:
-                                controller.app.start()
-                        except Exception as exc:  # noqa: BLE001
-                            QMessageBox.warning(self, "应用失败", str(exc))
-                            return
-
-                        logger.info("Control panel applied: script=%s auto_start=%s", chosen, self.auto_start.isChecked())
-                        QMessageBox.information(self, "已保存", "配置已保存并应用。")
-
-                    btn_browse_active.clicked.connect(lambda: _browse_target(self.active_script))
-                    btn_save.clicked.connect(_save_apply)
-                    btn_terminal.clicked.connect(
-                        lambda: _open_runtime_terminal(
-                            Path(self.active_script.text().strip() or str(controller.app.script_path)),
-                            self.log_file.text().strip(),
-                        )
-                    )
+                    btn_save.clicked.connect(self._save_apply)
+                    btn_terminal.clicked.connect(self._open_terminal)
                     btn_close.clicked.connect(self.close)
+
+                def _load_yaml_text(self) -> str:
+                    cfg_path = _panel_config_path()
+                    if cfg_path.exists():
+                        return cfg_path.read_text(encoding="utf-8")
+
+                    seed = dict(private_cfg)
+                    seed["script"] = str(controller.app.script_path)
+                    seed["auto_start"] = bool(_is_startup_enabled() or seed.get("auto_start", False))
+                    return yaml.safe_dump(seed, sort_keys=False, allow_unicode=True)
+
+                def _parse_yaml(self) -> dict[str, Any]:
+                    raw = self.yaml_editor.toPlainText()
+                    loaded = yaml.safe_load(raw)
+                    if loaded is None:
+                        return {}
+                    if not isinstance(loaded, dict):
+                        raise ValueError("YAML 顶层必须是对象（key: value）。")
+                    return loaded
+
+                def _save_apply(self) -> None:
+                    try:
+                        payload = self._parse_yaml()
+                    except Exception as exc:  # noqa: BLE001
+                        QMessageBox.warning(self, "YAML 解析失败", str(exc))
+                        return
+
+                    script_val = payload.get("script")
+                    chosen = controller.app.script_path
+                    if isinstance(script_val, str) and script_val.strip():
+                        chosen = Path(script_val.strip())
+                    if not chosen.exists():
+                        QMessageBox.warning(self, "路径无效", "YAML 中 script 指向的脚本不存在。")
+                        return
+
+                    interval_raw = payload.get("interval", controller.app.interval)
+                    try:
+                        interval = float(interval_raw)
+                    except Exception:  # noqa: BLE001
+                        QMessageBox.warning(self, "配置无效", "YAML 中 interval 必须是数字。")
+                        return
+
+                    isolate_mode = bool(payload.get("isolate_mode", controller.app.isolate_mode))
+                    auto_start = bool(payload.get("auto_start", _is_startup_enabled()))
+
+                    try:
+                        _set_startup_enabled(auto_start)
+                    except Exception as exc:  # noqa: BLE001
+                        QMessageBox.warning(self, "开机自启失败", str(exc))
+                        return
+
+                    text = self.yaml_editor.toPlainText()
+                    if text and not text.endswith("\n"):
+                        text += "\n"
+                    try:
+                        _panel_config_path().write_text(text, encoding="utf-8")
+                    except Exception as exc:  # noqa: BLE001
+                        QMessageBox.warning(self, "保存失败", str(exc))
+                        return
+
+                    glm_api_key = payload.get("glm_api_key")
+                    glm_model = payload.get("glm_model")
+                    glm_base_url = payload.get("glm_base_url")
+                    if isinstance(glm_api_key, str) and glm_api_key:
+                        os.environ["GLM_API_KEY"] = glm_api_key
+                    if isinstance(glm_model, str) and glm_model:
+                        os.environ["GLM_MODEL"] = glm_model
+                    if isinstance(glm_base_url, str) and glm_base_url:
+                        os.environ["GLM_BASE_URL"] = glm_base_url
+
+                    try:
+                        was_running = controller.app._worker is not None and controller.app._worker.is_alive()
+                        controller.app.stop()
+                        controller.app.script_path = chosen
+                        controller.app.interval = interval
+                        controller.app.isolate_mode = isolate_mode
+                        controller.app._watcher = None
+                        controller.app._stop_event.clear()
+                        if was_running:
+                            controller.app.start()
+                    except Exception as exc:  # noqa: BLE001
+                        QMessageBox.warning(self, "应用失败", str(exc))
+                        return
+
+                    logger.info("Control panel applied: script=%s auto_start=%s", chosen, auto_start)
+                    QMessageBox.information(self, "已保存", "YAML 配置已保存并应用。")
+
+                def _open_terminal(self) -> None:
+                    payload: dict[str, Any] = {}
+                    try:
+                        payload = self._parse_yaml()
+                    except Exception:
+                        payload = {}
+
+                    script_val = payload.get("script")
+                    log_val = payload.get("log_file")
+                    script_path = Path(script_val.strip()) if isinstance(script_val, str) and script_val.strip() else controller.app.script_path
+                    log_path = log_val.strip() if isinstance(log_val, str) else ""
+                    _open_runtime_terminal(script_path, log_path)
 
             while not popup_stop.is_set():
                 _handle_panel_commands()
