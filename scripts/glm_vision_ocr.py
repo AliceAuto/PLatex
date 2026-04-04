@@ -4,8 +4,8 @@ import base64
 import json
 import os
 import time
-
-import requests
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 def _copy_text_to_clipboard(text: str) -> None:
@@ -80,10 +80,18 @@ def process_image(image_bytes: bytes, context: dict[str, object] | None = None) 
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    response = requests.post(base_url, headers=headers, json=payload, timeout=90)
-    response.raise_for_status()
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(base_url, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(request, timeout=90) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+    except HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"GLM HTTP error {exc.code}: {error_body}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"GLM request failed: {exc.reason}") from exc
 
-    data = response.json()
+    data = json.loads(response_body)
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
         raise RuntimeError(f"GLM returned invalid response: {json.dumps(data, ensure_ascii=False)}")

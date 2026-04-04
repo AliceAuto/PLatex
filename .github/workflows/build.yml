@@ -31,7 +31,7 @@ jobs:
 
       - name: Build executable
         run: |
-          python -m PyInstaller --onefile --name platex-client --paths src --add-data "scripts/glm_vision_ocr.py;scripts" launcher.py --clean
+          python -m PyInstaller --onefile --name platex-client --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --hidden-import requests --hidden-import urllib3 --hidden-import certifi --hidden-import charset_normalizer --hidden-import idna launcher.py --clean
 
       - name: Build Inno Setup installer
         run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" platex-client.iss'
