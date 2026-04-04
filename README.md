@@ -161,6 +161,8 @@ platex-client history --limit 20
 
 ## 打包与发布
 
+当前仓库的构建与打包流程已经完全交给 GitHub Actions 处理，本地不需要手动执行 wheel、sdist 或 exe 打包。
+
 仓库里已经配置了 GitHub Actions：
 
 - [构建工作流](.github/workflows/build.yml)
