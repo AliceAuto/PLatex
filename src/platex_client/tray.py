@@ -4,6 +4,7 @@ import logging
 import os
 import queue
 import signal
+import subprocess
 import sys
 import threading
 from dataclasses import dataclass
@@ -63,17 +64,6 @@ def _load_panel_config(default_script: Path) -> dict[str, Any]:
     if isinstance(script_val, str) and script_val.strip():
         active_script = script_val
 
-    mounted_scripts = payload.get("mounted_scripts")
-    if not isinstance(mounted_scripts, list):
-        mounted_scripts = [active_script]
-    mounted_scripts = [str(x) for x in mounted_scripts if isinstance(x, str) and x.strip()]
-    if active_script not in mounted_scripts:
-        mounted_scripts.append(active_script)
-
-    private_env = payload.get("private_env")
-    if not isinstance(private_env, dict):
-        private_env = {}
-
     return {
         "db_path": payload.get("db_path") or "",
         "script": active_script,
@@ -83,8 +73,6 @@ def _load_panel_config(default_script: Path) -> dict[str, Any]:
         "glm_api_key": payload.get("glm_api_key") or "",
         "glm_model": payload.get("glm_model") or "",
         "glm_base_url": payload.get("glm_base_url") or "",
-        "mounted_scripts": mounted_scripts,
-        "private_env": {str(k): str(v) for k, v in private_env.items() if isinstance(k, str) and isinstance(v, str)},
         "auto_start": bool(payload.get("auto_start", False)),
         "ui_language": str(payload.get("ui_language", "en")),
         "language_pack": str(payload.get("language_pack", "")),
@@ -99,6 +87,13 @@ def _save_panel_config(payload: dict[str, Any]) -> None:
 def _startup_command() -> str:
     if getattr(sys, "frozen", False):
         return f'"{sys.executable}" tray'
+    if sys.platform == "win32":
+        exe = Path(sys.executable)
+        # Prefer pythonw.exe in startup to avoid showing a console window.
+        if exe.name.lower() == "python.exe":
+            pythonw = exe.with_name("pythonw.exe")
+            if pythonw.exists():
+                return f'"{pythonw}" -m platex_client.cli tray'
     return f'"{sys.executable}" -m platex_client.cli tray'
 
 
@@ -138,19 +133,36 @@ def _is_startup_enabled() -> bool:
         return False
 
 
-def _parse_env_lines(text: str) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if "=" not in stripped:
-            continue
-        key, value = stripped.split("=", 1)
-        key = key.strip()
-        if key:
-            result[key] = value.strip()
-    return result
+def _open_runtime_terminal(script_path: Path, log_path: str | None) -> None:
+    if sys.platform != "win32":
+        raise RuntimeError("Open terminal is currently supported on Windows only.")
+
+    workdir = script_path.parent if script_path.exists() else Path.cwd()
+    log_file = Path(log_path).expanduser() if log_path else None
+    safe_workdir = str(workdir).replace("'", "''")
+
+    ps_lines = [
+        f"Set-Location -LiteralPath '{safe_workdir}'",
+        "Write-Host 'PLatex runtime terminal' -ForegroundColor Cyan",
+        "Write-Host 'You can run: .\\platex-client.exe logs --limit 200' -ForegroundColor DarkGray",
+    ]
+    if log_file is not None:
+        safe_log = str(log_file).replace("'", "''")
+        ps_lines.extend(
+            [
+                f"if (Test-Path -LiteralPath '{safe_log}') {{",
+                "  Write-Host ''",
+                f"  Write-Host 'Tailing log: {safe_log}' -ForegroundColor Green",
+                f"  Get-Content -LiteralPath '{safe_log}' -Tail 50",
+                "}",
+            ]
+        )
+
+    command = "; ".join(ps_lines)
+    subprocess.Popen(
+        ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", command],
+        creationflags=subprocess.CREATE_NEW_CONSOLE,
+    )
 
 
 @dataclass(slots=True)
@@ -171,19 +183,10 @@ class TrayController:
         previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
         private_cfg = _load_panel_config(self.app.script_path)
-        mounted_scripts = [str(Path(p)) for p in private_cfg.get("mounted_scripts", []) if isinstance(p, str)]
-        if str(self.app.script_path) not in mounted_scripts:
-            mounted_scripts.append(str(self.app.script_path))
         active_script_raw = private_cfg.get("script")
         active_script = Path(active_script_raw) if isinstance(active_script_raw, str) and active_script_raw else self.app.script_path
         if active_script.exists():
             self.app.script_path = active_script
-
-        private_env = private_cfg.get("private_env", {})
-        if isinstance(private_env, dict):
-            for key, value in private_env.items():
-                if isinstance(key, str) and isinstance(value, str):
-                    os.environ[key] = value
 
         popup_queue: queue.Queue[tuple[str, str, int] | None] = queue.Queue()
         panel_queue: queue.Queue[str | None] = queue.Queue()
@@ -199,9 +202,7 @@ class TrayController:
                     QHBoxLayout,
                     QLabel,
                     QLineEdit,
-                    QListWidget,
                     QMessageBox,
-                    QPlainTextEdit,
                     QPushButton,
                     QDoubleSpinBox,
                     QVBoxLayout,
@@ -322,30 +323,6 @@ class TrayController:
                     script_row.addWidget(btn_browse_active)
                     root.addLayout(script_row)
 
-                    root.addWidget(QLabel("挂载脚本管理"))
-                    self.script_list = QListWidget()
-                    for item in mounted_scripts:
-                        self.script_list.addItem(item)
-                    root.addWidget(self.script_list)
-
-                    list_btns = QHBoxLayout()
-                    btn_add = QPushButton("添加脚本")
-                    btn_remove = QPushButton("移除选中")
-                    btn_use = QPushButton("设为当前")
-                    list_btns.addWidget(btn_add)
-                    list_btns.addWidget(btn_remove)
-                    list_btns.addWidget(btn_use)
-                    root.addLayout(list_btns)
-
-                    root.addWidget(QLabel("私有配置（每行 KEY=VALUE）"))
-                    self.private_env_text = QPlainTextEdit()
-                    env_lines: list[str] = []
-                    for k, v in private_env.items() if isinstance(private_env, dict) else []:
-                        if isinstance(k, str) and isinstance(v, str):
-                            env_lines.append(f"{k}={v}")
-                    self.private_env_text.setPlainText("\n".join(env_lines))
-                    root.addWidget(self.private_env_text)
-
                     root.addWidget(QLabel("日志路径（log_file）"))
                     self.log_file = QLineEdit(str(private_cfg.get("log_file", "")))
                     root.addWidget(self.log_file)
@@ -377,8 +354,10 @@ class TrayController:
 
                     action_row = QHBoxLayout()
                     btn_save = QPushButton("保存并应用")
+                    btn_terminal = QPushButton("打开终端")
                     btn_close = QPushButton("关闭")
                     action_row.addWidget(btn_save)
+                    action_row.addWidget(btn_terminal)
                     action_row.addWidget(btn_close)
                     root.addLayout(action_row)
 
@@ -387,35 +366,11 @@ class TrayController:
                         if path:
                             line_edit.setText(path)
 
-                    def _add_script() -> None:
-                        path, _ = QFileDialog.getOpenFileName(self, "添加挂载脚本", str(Path.cwd()), "Python (*.py)")
-                        if not path:
-                            return
-                        items = [self.script_list.item(i).text() for i in range(self.script_list.count())]
-                        if path not in items:
-                            self.script_list.addItem(path)
-
-                    def _remove_script() -> None:
-                        row = self.script_list.currentRow()
-                        if row >= 0:
-                            self.script_list.takeItem(row)
-
-                    def _use_selected() -> None:
-                        item = self.script_list.currentItem()
-                        if item is not None:
-                            self.active_script.setText(item.text())
-
                     def _save_apply() -> None:
                         chosen = Path(self.active_script.text().strip())
                         if not chosen.exists():
                             QMessageBox.warning(self, "路径无效", "当前挂载脚本不存在，请重新选择。")
                             return
-
-                        scripts = [self.script_list.item(i).text() for i in range(self.script_list.count())]
-                        if str(chosen) not in scripts:
-                            scripts.append(str(chosen))
-
-                        env_map = _parse_env_lines(self.private_env_text.toPlainText())
 
                         try:
                             _set_startup_enabled(self.auto_start.isChecked())
@@ -433,8 +388,6 @@ class TrayController:
                             "glm_api_key": self.glm_api_key.text().strip(),
                             "glm_model": self.glm_model.text().strip(),
                             "glm_base_url": self.glm_base_url.text().strip(),
-                            "mounted_scripts": scripts,
-                            "private_env": env_map,
                         }
                         try:
                             _save_panel_config(payload)
@@ -442,8 +395,6 @@ class TrayController:
                             QMessageBox.warning(self, "保存失败", str(exc))
                             return
 
-                        for k, v in env_map.items():
-                            os.environ[k] = v
                         if payload["glm_api_key"]:
                             os.environ["GLM_API_KEY"] = str(payload["glm_api_key"])
                         if payload["glm_model"]:
@@ -469,10 +420,13 @@ class TrayController:
                         QMessageBox.information(self, "已保存", "配置已保存并应用。")
 
                     btn_browse_active.clicked.connect(lambda: _browse_target(self.active_script))
-                    btn_add.clicked.connect(_add_script)
-                    btn_remove.clicked.connect(_remove_script)
-                    btn_use.clicked.connect(_use_selected)
                     btn_save.clicked.connect(_save_apply)
+                    btn_terminal.clicked.connect(
+                        lambda: _open_runtime_terminal(
+                            Path(self.active_script.text().strip() or str(controller.app.script_path)),
+                            self.log_file.text().strip(),
+                        )
+                    )
                     btn_close.clicked.connect(self.close)
 
             while not popup_stop.is_set():
