@@ -43,7 +43,13 @@ def _build_icon_image():
 
 
 def _panel_config_path() -> Path:
-    path = default_config_path()
+    cwd = Path.cwd()
+    candidates = [
+        cwd / "config.yaml",
+        cwd / "config.example.yaml",
+        default_config_path(),
+    ]
+    path = next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
     path.parent.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -197,6 +203,8 @@ class TrayController:
                 from PyQt6.QtCore import QTimer, Qt
                 from PyQt6.QtWidgets import (
                     QApplication,
+                    QCheckBox,
+                    QComboBox,
                     QHBoxLayout,
                     QLabel,
                     QMessageBox,
@@ -210,7 +218,9 @@ class TrayController:
                 return
 
             app = QApplication([])
+            app.setQuitOnLastWindowClosed(False)
             panel_window: QWidget | None = None
+            active_popups: list[QWidget] = []
 
             def _handle_panel_commands() -> None:
                 nonlocal panel_window
@@ -304,11 +314,24 @@ class TrayController:
                     root.setContentsMargins(14, 14, 14, 14)
                     root.setSpacing(10)
 
+                    self.auto_start = QCheckBox("开机自启")
+                    root.addWidget(self.auto_start)
+
+                    lang_row = QHBoxLayout()
+                    lang_row.addWidget(QLabel("客户端语言"))
+                    self.ui_language = QComboBox()
+                    self.ui_language.addItem("中文（zh-cn）", "zh-cn")
+                    self.ui_language.addItem("English (en)", "en")
+                    lang_row.addWidget(self.ui_language)
+                    root.addLayout(lang_row)
+
                     root.addWidget(QLabel("配置文件（完整 YAML，可滚动编辑）"))
                     self.yaml_editor = QPlainTextEdit()
                     self.yaml_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
                     self.yaml_editor.setPlainText(self._load_yaml_text())
                     root.addWidget(self.yaml_editor)
+
+                    self._sync_ui_from_yaml()
 
                     action_row = QHBoxLayout()
                     btn_save = QPushButton("保存并应用")
@@ -322,6 +345,22 @@ class TrayController:
                     btn_save.clicked.connect(self._save_apply)
                     btn_terminal.clicked.connect(self._open_terminal)
                     btn_close.clicked.connect(self.close)
+
+                def _sync_ui_from_yaml(self) -> None:
+                    payload: dict[str, Any] = {}
+                    try:
+                        payload = self._parse_yaml()
+                    except Exception:
+                        payload = {}
+
+                    auto_start = bool(payload.get("auto_start", _is_startup_enabled() or bool(private_cfg.get("auto_start", False))))
+                    self.auto_start.setChecked(auto_start)
+
+                    lang = str(payload.get("ui_language", private_cfg.get("ui_language", "en"))).strip().lower() or "en"
+                    lang_idx = self.ui_language.findData(lang)
+                    if lang_idx < 0:
+                        lang_idx = self.ui_language.findData("en")
+                    self.ui_language.setCurrentIndex(max(0, lang_idx))
 
                 def _load_yaml_text(self) -> str:
                     cfg_path = _panel_config_path()
@@ -365,7 +404,11 @@ class TrayController:
                         return
 
                     isolate_mode = bool(payload.get("isolate_mode", controller.app.isolate_mode))
-                    auto_start = bool(payload.get("auto_start", _is_startup_enabled()))
+                    auto_start = bool(self.auto_start.isChecked())
+                    ui_language = str(self.ui_language.currentData() or "en")
+
+                    payload["auto_start"] = auto_start
+                    payload["ui_language"] = ui_language
 
                     try:
                         _set_startup_enabled(auto_start)
@@ -373,11 +416,10 @@ class TrayController:
                         QMessageBox.warning(self, "开机自启失败", str(exc))
                         return
 
-                    text = self.yaml_editor.toPlainText()
-                    if text and not text.endswith("\n"):
-                        text += "\n"
+                    text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
                     try:
                         _panel_config_path().write_text(text, encoding="utf-8")
+                        self.yaml_editor.setPlainText(text)
                     except Exception as exc:  # noqa: BLE001
                         QMessageBox.warning(self, "保存失败", str(exc))
                         return
@@ -422,40 +464,53 @@ class TrayController:
                     log_path = log_val.strip() if isinstance(log_val, str) else ""
                     _open_runtime_terminal(script_path, log_path)
 
-            while not popup_stop.is_set():
+            def _pump_messages() -> None:
                 _handle_panel_commands()
+                while True:
+                    try:
+                        item = popup_queue.get_nowait()
+                    except queue.Empty:
+                        break
 
-                try:
-                    item = popup_queue.get(timeout=0.1)
-                except queue.Empty:
-                    app.processEvents()
-                    continue
+                    if item is None:
+                        app.quit()
+                        return
 
-                if item is None:
-                    break
+                    title, latex, timeout_ms = item
+                    preview = latex.replace("\n", " ").strip()
+                    if len(preview) > 220:
+                        preview = preview[:217] + "..."
+                    message = f"{preview or 'OCR completed'}\n\n结果已写入剪贴板，直接粘贴即可。"
 
-                title, latex, timeout_ms = item
-                preview = latex.replace("\n", " ").strip()
-                if len(preview) > 220:
-                    preview = preview[:217] + "..."
-                message = f"{preview or 'OCR completed'}\n\n结果已写入剪贴板，直接粘贴即可。"
+                    popup = _Popup(title, message)
+                    screen = app.primaryScreen()
+                    if screen is not None:
+                        available = screen.availableGeometry()
+                        x = max(available.left() + 8, available.right() - popup.width() - 20)
+                        y = available.top() + 24
+                        popup.move(x, y)
 
-                popup = _Popup(title, message)
-                screen = app.primaryScreen()
-                if screen is not None:
-                    available = screen.availableGeometry()
-                    x = max(available.left() + 8, available.right() - popup.width() - 20)
-                    y = available.top() + 24
-                    popup.move(x, y)
+                    popup.setWindowOpacity(1.0)
+                    popup.show()
+                    popup.raise_()
+                    popup.activateWindow()
+                    popup.start_auto_fade(timeout_ms)
+                    active_popups.append(popup)
 
-                popup.setWindowOpacity(1.0)
-                popup.show()
-                popup.raise_()
-                popup.activateWindow()
-                popup.start_auto_fade(timeout_ms)
-                app.processEvents()
+                    def _release_popup_ref(_obj=None, *, _popup=popup) -> None:
+                        try:
+                            active_popups.remove(_popup)
+                        except ValueError:
+                            pass
 
-            app.quit()
+                    popup.destroyed.connect(_release_popup_ref)
+
+            pump_timer = QTimer()
+            pump_timer.setInterval(16)
+            pump_timer.timeout.connect(_pump_messages)
+            pump_timer.start()
+
+            app.exec()
 
         popup_thread = threading.Thread(target=popup_loop, name="platex-qt-popup-loop", daemon=True)
         popup_thread.start()
