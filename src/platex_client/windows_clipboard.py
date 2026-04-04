@@ -72,6 +72,23 @@ def _set_text_ctypes(text: str) -> None:
                 raise RuntimeError("Unable to write text to Windows clipboard")
 
 
+def _read_text_ctypes() -> str:
+    with _clipboard_lock:
+        with _open_clipboard():
+            handle = _user32.GetClipboardData(_CF_UNICODETEXT)
+            if not handle:
+                raise RuntimeError("Unable to read text from Windows clipboard")
+
+            pointer = _kernel32.GlobalLock(handle)
+            if not pointer:
+                raise RuntimeError("Unable to lock Windows clipboard text")
+
+            try:
+                return ctypes.wstring_at(pointer)
+            finally:
+                _kernel32.GlobalUnlock(handle)
+
+
 def _set_text_tkinter(text: str) -> None:
     """Set text to Windows clipboard using tkinter (most reliable pure-Python method)."""
     import tkinter as tk
@@ -102,7 +119,10 @@ def _set_text_with_retry(text: str) -> None:
     for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
         try:
             _set_text_ctypes(text)
-            return
+            time.sleep(0.05)
+            if _read_text_ctypes() == text:
+                return
+            raise RuntimeError("Clipboard verification failed after ctypes write")
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             logger.debug(
@@ -116,7 +136,10 @@ def _set_text_with_retry(text: str) -> None:
     for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
         try:
             _set_text_tkinter(text)
-            return
+            time.sleep(0.05)
+            if _read_text_ctypes() == text:
+                return
+            raise RuntimeError("Clipboard verification failed after tkinter write")
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             logger.debug(
