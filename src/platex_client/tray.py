@@ -43,11 +43,22 @@ class TrayController:
 
         def show_status() -> str:
             latest = self.history.latest()
+            mode = "isolated" if self.app.isolate_mode else "watching"
             if latest is None:
-                return "PLatex Client | waiting for clipboard image"
+                return f"PLatex Client | {mode} | waiting for clipboard image"
             if latest.status == "ok":
-                return f"PLatex Client | latest {latest.image_hash[:10]}"
-            return f"PLatex Client | last error {latest.error}"
+                return f"PLatex Client | {mode} | latest {latest.image_hash[:10]}"
+            return f"PLatex Client | {mode} | last error {latest.error}"
+
+        def ocr_once(_icon, _item) -> None:
+            event = self.app.run_once()
+            if event is None:
+                logger.info("Manual OCR once: no clipboard image found")
+            elif event.status == "ok":
+                logger.info("Manual OCR once success: %s", event.image_hash[:10])
+            else:
+                logger.warning("Manual OCR once failed: %s", event.error)
+            icon.title = show_status()
 
         def copy_latest(_icon, _item) -> None:
             latest = self.history.latest()
@@ -65,6 +76,7 @@ class TrayController:
             icon.stop()
 
         menu = Menu(
+            MenuItem("OCR once now", ocr_once),
             MenuItem("Copy latest LaTeX", copy_latest, default=True),
             MenuItem("Refresh status", refresh),
             MenuItem("Exit", quit_app),
