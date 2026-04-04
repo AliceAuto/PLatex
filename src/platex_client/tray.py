@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .app import PlatexApp
-from .clipboard import copy_text_to_clipboard_fast
 from .history import HistoryStore
 from .models import ClipboardEvent
 
@@ -52,7 +51,7 @@ class TrayController:
         pystray, Menu, MenuItem = _load_pystray()
         previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
-        def show_click_to_copy_popup(title: str, latex: str, timeout_ms: int = 12000) -> None:
+        def show_success_popup(title: str, latex: str, timeout_ms: int = 12000) -> None:
             def worker() -> None:
                 try:
                     import tkinter as tk
@@ -87,7 +86,7 @@ class TrayController:
                     message_label.pack(fill="both", expand=True, pady=(6, 0))
                     status_label = tk.Label(
                         frame,
-                        text="点击弹窗任意位置复制公式",
+                        text="结果已写入剪贴板，关闭后直接粘贴",
                         justify="left",
                         anchor="w",
                         wraplength=580,
@@ -96,34 +95,9 @@ class TrayController:
                     )
                     status_label.pack(fill="x", pady=(0, 6))
 
-                    state = {"busy": False, "copied": False}
-
-                    def copy_and_close(_event=None) -> None:
-                        if state["busy"] or state["copied"]:
-                            return
-                        state["busy"] = True
-                        status_label.config(text="正在复制...")
-                        button.config(state="disabled")
-                        try:
-                            copy_text_to_clipboard_fast(latex)
-                            state["copied"] = True
-                            logger.info("Copied OCR result from popup")
-                            status_label.config(text="已复制到剪贴板")
-                            root.after(300, root.destroy)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.exception("Popup copy failed: %s", exc)
-                            status_label.config(text="复制失败，请重试")
-                            button.config(state="normal")
-                            state["busy"] = False
-
-                    root.bind("<Button-1>", copy_and_close)
-                    frame.bind("<Button-1>", copy_and_close)
-                    message_label.bind("<Button-1>", copy_and_close)
-                    status_label.bind("<Button-1>", copy_and_close)
-
                     button_row = tk.Frame(frame)
                     button_row.pack(fill="x")
-                    button = tk.Button(button_row, text="点击复制", command=copy_and_close)
+                    button = tk.Button(button_row, text="关闭", command=root.destroy)
                     button.pack(side="right")
 
                     root.after(timeout_ms, root.destroy)
@@ -153,15 +127,8 @@ class TrayController:
             icon.title = show_status()
 
         def notify_success(event: ClipboardEvent) -> None:
-            show_click_to_copy_popup("PLatex OCR Success", event.latex)
+            show_success_popup("PLatex OCR Success", event.latex)
             logger.info("OCR success popup emitted hash=%s", event.image_hash[:10])
-
-        def copy_latest(_icon, _item) -> None:
-            latest = self.history.latest()
-            if latest is None or latest.status != "ok" or not latest.latex.strip():
-                return
-            copy_text_to_clipboard_fast(latest.latex)
-            logger.info("Copied latest LaTeX from tray menu")
 
         def refresh(_icon, _item) -> None:
             icon.title = show_status()
@@ -173,7 +140,6 @@ class TrayController:
 
         menu = Menu(
             MenuItem("OCR once now", ocr_once),
-            MenuItem("Copy latest LaTeX", copy_latest, default=True),
             MenuItem("Refresh status", refresh),
             MenuItem("Exit", quit_app),
         )

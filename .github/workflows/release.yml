@@ -29,27 +29,17 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build pyinstaller
+          python -m pip install pyinstaller
 
-      - name: Build wheel and sdist
-        run: |
-          python -m build
+      - name: Install Inno Setup
+        run: choco install innosetup -y
 
       - name: Build executable
         run: |
-          python -m PyInstaller --onefile --name platex-client --paths src launcher.py --clean
+          python -m PyInstaller --onefile --name platex-client --paths src --add-data "scripts/glm_vision_ocr.py;scripts" launcher.py --clean
 
-      - name: Prepare release bundle
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path release/PLatexClient-0.1.0/scripts | Out-Null
-          Copy-Item dist/platex-client.exe release/PLatexClient-0.1.0/ -Force
-          Copy-Item dist/platex_client-*.whl release/PLatexClient-0.1.0/ -Force
-          Copy-Item dist/platex_client-*.tar.gz release/PLatexClient-0.1.0/ -Force
-          Copy-Item README.md release/PLatexClient-0.1.0/ -Force
-          Copy-Item config.example.yaml release/PLatexClient-0.1.0/ -Force
-          Copy-Item scripts/glm_vision_ocr.py release/PLatexClient-0.1.0/scripts/ -Force
-          Compress-Archive -Path release/PLatexClient-0.1.0/* -DestinationPath release/PLatexClient-0.1.0-win64.zip -Force
+      - name: Build Inno Setup installer
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" platex-client.iss'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -58,10 +48,7 @@ jobs:
           name: Auto Release ${{ github.run_number }}
           generate_release_notes: true
           files: |
-            dist/platex-client.exe
-            dist/platex_client-*.whl
-            dist/platex_client-*.tar.gz
-            release/PLatexClient-0.1.0-win64.zip
+            dist/installer/*.exe
           prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

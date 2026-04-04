@@ -3,8 +3,28 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 
 import requests
+
+
+def _copy_text_to_clipboard(text: str) -> None:
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.clipboard_clear()
+        root.update()
+        time.sleep(0.01)
+        root.clipboard_append(text)
+        root.update()
+        time.sleep(0.03)
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
 
 
 def _extract_latex(content: object) -> str:
@@ -73,4 +93,5 @@ def process_image(image_bytes: bytes, context: dict[str, object] | None = None) 
     if not latex:
         raise RuntimeError(f"GLM returned no usable OCR result: {json.dumps(data, ensure_ascii=False)}")
 
+    _copy_text_to_clipboard(latex)
     return latex
