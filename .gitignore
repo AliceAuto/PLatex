@@ -1,0 +1,12 @@
+# Python build/cache artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Packaging metadata
+*.egg-info/
+
+# Local build outputs
+build/
+dist/
