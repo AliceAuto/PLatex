@@ -22,9 +22,6 @@ PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
-[Languages]
-Name: "schinese"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
-
 [Tasks]
 Name: "desktopicon"; Description: "Create a &desktop icon"; GroupDescription: "Additional icons:"; Flags: unchecked
 
