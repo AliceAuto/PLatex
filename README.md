@@ -78,9 +78,8 @@ platex-client logs --limit 50
 
 默认情况下，OCR 成功后会：
 
-1. 将识别结果写入系统剪贴板顶部
-2. 保留本地历史记录
-3. 弹出成功提示窗口，点击后复制公式
+1. 保留本地历史记录
+2. 弹出成功提示窗口，点击后复制公式
 
 注意：当前实现不会把图片回写到剪贴板，也不会自动把识别结果直接写入剪贴板；需要点击成功弹窗后再复制。
 
@@ -105,7 +104,6 @@ glm_api_key: your-api-key
 glm_model: glm-4.1v-thinking-flash
 glm_base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
 isolate_mode: false
-restore_delay: 0.25
 interval: 0.8
 ```
 
@@ -186,5 +184,5 @@ platex-client history --limit 20
 
 - 自动模式下，程序会持续监听剪贴板图片并自动 OCR
 - 强隔离模式下，不会后台监听，只能手动触发一次 OCR
-- OCR 成功后，结果会直接放到系统剪贴板顶部，便于粘贴
+- OCR 成功后，结果会通过点击弹窗复制到系统剪贴板，便于粘贴
 - 如果脚本失败，错误会写入历史，便于排查

@@ -108,17 +108,6 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Strong isolation mode: disable background polling and run OCR only when manually triggered.",
     )
-    parser.add_argument(
-        "--publish-latex",
-        action="store_true",
-        help="Publish OCR text directly to the top of the Windows clipboard history.",
-    )
-    parser.add_argument(
-        "--restore-delay",
-        type=float,
-        default=None,
-        help="Deprecated option kept for backward compatibility (no effect).",
-    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve", help="Start clipboard monitoring.")
@@ -145,7 +134,6 @@ def _resolve_runtime_config(args: argparse.Namespace):
         "log_file": args.log_file or config.log_file or default_log_path(),
         "interval": args.interval if args.interval is not None else config.interval,
         "isolate_mode": args.isolate or config.isolate_mode,
-        "restore_delay": args.restore_delay if args.restore_delay is not None else config.restore_delay,
     }
 
 
@@ -185,7 +173,7 @@ def _tray(args: argparse.Namespace) -> int:
     if not _acquire_single_instance_lock():
         print("PLatex tray is already running. Please exit the existing tray instance first.")
         return 1
-
+    
     try:
         runtime = _resolve_runtime_config(args)
         setup_logging(runtime["log_file"])
@@ -194,7 +182,6 @@ def _tray(args: argparse.Namespace) -> int:
             script_path=runtime["script"],
             interval=runtime["interval"],
             isolate_mode=runtime["isolate_mode"],
-            restore_delay=runtime["restore_delay"],
         )
         history = HistoryStore(runtime["db_path"])
         controller = TrayController(app=app, history=history)
@@ -262,7 +249,6 @@ def _once(args: argparse.Namespace) -> int:
         script_path=runtime["script"],
         interval=runtime["interval"],
         isolate_mode=True,
-        restore_delay=runtime["restore_delay"],
     )
     event = app.run_once()
     if event is None:

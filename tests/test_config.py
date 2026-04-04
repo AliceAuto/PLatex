@@ -17,8 +17,6 @@ class ConfigTests(unittest.TestCase):
 glm_api_key: yaml-key
 glm_model: glm-test-model
 glm_base_url: https://example.invalid/v1
-publish_latex: true
-restore_delay: 0.5
 interval: 1.25
 """.strip(),
                 encoding="utf-8",
@@ -37,8 +35,6 @@ interval: 1.25
                 self.assertEqual(config.glm_api_key, "yaml-key")
                 self.assertEqual(config.glm_model, "glm-test-model")
                 self.assertEqual(config.glm_base_url, "https://example.invalid/v1")
-                self.assertTrue(config.publish_latex)
-                self.assertEqual(config.restore_delay, 0.5)
                 self.assertEqual(config.interval, 1.25)
                 self.assertEqual(os.environ.get("GLM_API_KEY"), "yaml-key")
             finally:

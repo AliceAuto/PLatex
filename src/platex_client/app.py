@@ -19,7 +19,6 @@ class PlatexApp:
     script_path: Path
     interval: float = 0.8
     isolate_mode: bool = False
-    restore_delay: float = 0.25
     on_ocr_success: Callable[[ClipboardEvent], None] | None = None
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _worker: threading.Thread | None = field(default=None, init=False, repr=False)
@@ -65,7 +64,7 @@ class PlatexApp:
 
     def run_once(self):
         watcher = self._ensure_watcher()
-        event = watcher.poll_once()
+        event = watcher.poll_once(force=True)
         if event is not None and event.status == "ok" and self.on_ocr_success is not None:
             self.on_ocr_success(event)
         return event

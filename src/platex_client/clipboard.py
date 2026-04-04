@@ -8,7 +8,7 @@ import time
 
 from PIL import Image, ImageGrab
 
-from .windows_clipboard import _clipboard_lock, set_text
+from .windows_clipboard import _clipboard_lock, _set_text_tkinter, set_text
 from .models import ClipboardImage
 
 
@@ -43,3 +43,13 @@ def image_hash(image_bytes: bytes) -> str:
 
 def copy_text_to_clipboard(text: str) -> None:
     set_text(text)
+
+
+def copy_text_to_clipboard_fast(text: str) -> None:
+    """Write text to the clipboard with a single best-effort attempt."""
+    try:
+        with _clipboard_lock:
+            _set_text_tkinter(text)
+    except Exception:
+        # Fall back to the verified path if the fast tkinter path fails.
+        set_text(text)

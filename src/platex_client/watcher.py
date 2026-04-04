@@ -5,7 +5,6 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from collections.abc import Callable
 
 from .clipboard import grab_image_clipboard, image_hash
 from .history import HistoryStore
@@ -19,7 +18,6 @@ class ClipboardWatcher:
     source_name: str
     last_image_hash: str | None = None
     last_image_time: float | None = None
-    last_publish_time: float | None = None
     ocr_start_time: float | None = None
     _processing_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
     _publishing: bool = field(default=False, init=False, repr=False)
@@ -28,7 +26,7 @@ class ClipboardWatcher:
     def set_publishing(self, is_publishing: bool) -> None:
         self._publishing = is_publishing
 
-    def poll_once(self) -> ClipboardEvent | None:
+    def poll_once(self, *, force: bool = False) -> ClipboardEvent | None:
         # Skip processing if currently publishing to clipboard
         if self._publishing:
             self.logger.debug("Skipping poll during clipboard publish/restore")
@@ -52,20 +50,10 @@ class ClipboardWatcher:
 
             current_hash = image_hash(image.image_bytes)
             current_time = time.time()
-            
-            # Skip if same hash detected within 3 seconds (likely clipboard restore echo)
-            if current_hash == self.last_image_hash and self.last_image_time is not None:
-                time_delta = current_time - self.last_image_time
-                if time_delta < 3.0:
-                    self.logger.debug("Skipping duplicate clipboard image echo: %s (%.1fs ago)", current_hash[:10], time_delta)
-                    return None
 
-            # Skip if recent publish operation (within 1.5 seconds) to avoid restoring image being processed
-            if self.last_publish_time is not None:
-                time_since_publish = current_time - self.last_publish_time
-                if time_since_publish < 1.5:
-                    self.logger.debug("Skipping image within %.1fs of publish (likely restore)", time_since_publish)
-                    return None
+            if not force and current_hash == self.last_image_hash:
+                self.logger.debug("Skipping already processed clipboard image: %s", current_hash[:10])
+                return None
 
             self.last_image_hash = current_hash
             self.last_image_time = current_time

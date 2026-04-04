@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .app import PlatexApp
-from .clipboard import copy_text_to_clipboard
+from .clipboard import copy_text_to_clipboard_fast
 from .history import HistoryStore
 from .models import ClipboardEvent
 
@@ -39,6 +39,13 @@ def _build_icon_image():
 class TrayController:
     app: PlatexApp
     history: HistoryStore
+
+    @staticmethod
+    def _limit_title(text: str, limit: int = 120) -> str:
+        text = text.replace("\n", " ").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
 
     def run(self) -> int:
         logger = logging.getLogger("platex.tray")
@@ -89,20 +96,25 @@ class TrayController:
                     )
                     status_label.pack(fill="x", pady=(0, 6))
 
-                    copied = {"done": False}
+                    state = {"busy": False, "copied": False}
 
                     def copy_and_close(_event=None) -> None:
-                        if copied["done"]:
+                        if state["busy"] or state["copied"]:
                             return
+                        state["busy"] = True
+                        status_label.config(text="正在复制...")
+                        button.config(state="disabled")
                         try:
-                            copy_text_to_clipboard(latex)
-                            copied["done"] = True
-                            status_label.config(text="已复制到剪贴板")
+                            copy_text_to_clipboard_fast(latex)
+                            state["copied"] = True
                             logger.info("Copied OCR result from popup")
-                            root.after(500, root.destroy)
+                            status_label.config(text="已复制到剪贴板")
+                            root.after(300, root.destroy)
                         except Exception as exc:  # noqa: BLE001
                             logger.exception("Popup copy failed: %s", exc)
                             status_label.config(text="复制失败，请重试")
+                            button.config(state="normal")
+                            state["busy"] = False
 
                     root.bind("<Button-1>", copy_and_close)
                     frame.bind("<Button-1>", copy_and_close)
@@ -111,7 +123,8 @@ class TrayController:
 
                     button_row = tk.Frame(frame)
                     button_row.pack(fill="x")
-                    tk.Button(button_row, text="点击复制", command=copy_and_close).pack(side="right")
+                    button = tk.Button(button_row, text="点击复制", command=copy_and_close)
+                    button.pack(side="right")
 
                     root.after(timeout_ms, root.destroy)
                     root.mainloop()
@@ -126,8 +139,8 @@ class TrayController:
             if latest is None:
                 return f"PLatex Client | {mode} | waiting for clipboard image"
             if latest.status == "ok":
-                return f"PLatex Client | {mode} | latest {latest.image_hash[:10]}"
-            return f"PLatex Client | {mode} | last error {latest.error}"
+                return self._limit_title(f"PLatex Client | {mode} | latest {latest.image_hash[:10]}")
+            return self._limit_title(f"PLatex Client | {mode} | last error {latest.error}")
 
         def ocr_once(_icon, _item) -> None:
             event = self.app.run_once()
@@ -147,7 +160,7 @@ class TrayController:
             latest = self.history.latest()
             if latest is None or latest.status != "ok" or not latest.latex.strip():
                 return
-            copy_text_to_clipboard(latest.latex)
+            copy_text_to_clipboard_fast(latest.latex)
             logger.info("Copied latest LaTeX from tray menu")
 
         def refresh(_icon, _item) -> None:
@@ -164,7 +177,7 @@ class TrayController:
             MenuItem("Refresh status", refresh),
             MenuItem("Exit", quit_app),
         )
-        icon = pystray.Icon("PLatexClient", _build_icon_image(), show_status(), menu)
+        icon = pystray.Icon("PLatexClient", _build_icon_image(), self._limit_title(show_status()), menu)
         self.app.on_ocr_success = notify_success
         self.app.start()
         try:

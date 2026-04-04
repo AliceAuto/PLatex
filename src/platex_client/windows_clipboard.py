@@ -99,11 +99,11 @@ def _set_text_tkinter(text: str) -> None:
     try:
         root.clipboard_clear()
         root.update()  # Process pending events
-        time.sleep(0.05)  # Wait for clipboard lock release
+        time.sleep(0.01)  # Brief pause for clipboard state to settle
         
         root.clipboard_append(text)
         root.update()  # Ensure clipboard operation is processed
-        time.sleep(0.15)  # Give Windows time to copy to system clipboard
+        time.sleep(0.03)  # Give Windows a small window to commit the data
         
         logger.info("tkinter Set-Clipboard succeeded")
     finally:
@@ -119,10 +119,16 @@ def _set_text_with_retry(text: str) -> None:
     for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
         try:
             _set_text_ctypes(text)
-            time.sleep(0.05)
-            if _read_text_ctypes() == text:
-                return
-            raise RuntimeError("Clipboard verification failed after ctypes write")
+            verify_error: Exception | None = None
+            for verify_attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+                try:
+                    time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * verify_attempt)
+                    if _read_text_ctypes() == text:
+                        return
+                except Exception as exc:  # noqa: BLE001
+                    verify_error = exc
+                    continue
+            raise RuntimeError("Clipboard verification failed after ctypes write") from verify_error
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             logger.debug(
@@ -136,10 +142,16 @@ def _set_text_with_retry(text: str) -> None:
     for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
         try:
             _set_text_tkinter(text)
-            time.sleep(0.05)
-            if _read_text_ctypes() == text:
-                return
-            raise RuntimeError("Clipboard verification failed after tkinter write")
+            verify_error: Exception | None = None
+            for verify_attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+                try:
+                    time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * verify_attempt)
+                    if _read_text_ctypes() == text:
+                        return
+                except Exception as exc:  # noqa: BLE001
+                    verify_error = exc
+                    continue
+            raise RuntimeError("Clipboard verification failed after tkinter write") from verify_error
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             logger.debug(
@@ -159,13 +171,3 @@ def set_text(text: str) -> None:
     except Exception as exc:
         logger.exception("Unable to write text to Windows clipboard after retries: %s", exc)
         raise
-
-
-def publish_text_to_clipboard(text: str) -> None:
-    """Publish LaTeX text to system clipboard (no image restoration)."""
-    try:
-        logger.debug("Publishing to clipboard: %s", text[:100].replace("\n", " "))
-        set_text(text)
-        logger.info("LaTeX published to clipboard top")
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Error during clipboard publish: %s", exc)
