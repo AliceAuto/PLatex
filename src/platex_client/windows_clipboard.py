@@ -12,6 +12,9 @@ logger = logging.getLogger("platex.clipboard")
 _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE = 0x0002
 
+_MAX_CLIPBOARD_ATTEMPTS = 8
+_CLIPBOARD_RETRY_DELAY_SECONDS = 0.12
+
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
 _clipboard_lock = threading.Lock()
@@ -45,6 +48,18 @@ def _allocate_global_memory(data: bytes) -> int:
     return handle
 
 
+def _set_text_ctypes(text: str) -> None:
+    encoded = text.encode("utf-16-le") + b"\x00\x00"
+    handle = _allocate_global_memory(encoded)
+
+    with _clipboard_lock:
+        with _open_clipboard():
+            _user32.EmptyClipboard()
+            if not _user32.SetClipboardData(_CF_UNICODETEXT, handle):
+                _kernel32.GlobalFree(handle)
+                raise RuntimeError("Unable to write text to Windows clipboard")
+
+
 def _set_text_tkinter(text: str) -> None:
     """Set text to Windows clipboard using tkinter (most reliable pure-Python method)."""
     import tkinter as tk
@@ -69,30 +84,53 @@ def _set_text_tkinter(text: str) -> None:
             pass
 
 
+def _set_text_with_retry(text: str) -> None:
+    last_error: Exception | None = None
+
+    for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+        try:
+            _set_text_ctypes(text)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.debug(
+                "ctypes clipboard write attempt %s/%s failed: %s",
+                attempt,
+                _MAX_CLIPBOARD_ATTEMPTS,
+                exc,
+            )
+            time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
+
+    for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+        try:
+            _set_text_tkinter(text)
+            return
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            logger.debug(
+                "tkinter clipboard write attempt %s/%s failed: %s",
+                attempt,
+                _MAX_CLIPBOARD_ATTEMPTS,
+                exc,
+            )
+            time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
+
+    raise RuntimeError("Unable to write text to clipboard after retries") from last_error
+
+
 def set_text(text: str) -> None:
     try:
-        encoded = text.encode("utf-16-le") + b"\x00\x00"
-        handle = _allocate_global_memory(encoded)
-
-        with _clipboard_lock:
-            with _open_clipboard():
-                _user32.EmptyClipboard()
-                if not _user32.SetClipboardData(_CF_UNICODETEXT, handle):
-                    _kernel32.GlobalFree(handle)
-                    raise RuntimeError("Unable to write text to Windows clipboard")
+        _set_text_with_retry(text)
     except Exception as exc:
-        logger.warning("ctypes clipboard write failed, falling back to tkinter: %s", exc)
-        _set_text_tkinter(text)
+        logger.exception("Unable to write text to Windows clipboard after retries: %s", exc)
+        raise
 
 
 def publish_text_to_clipboard(text: str) -> None:
     """Publish LaTeX text to system clipboard (no image restoration)."""
-    def worker() -> None:
-        try:
-            logger.debug("Publishing to clipboard: %s", text[:100].replace("\n", " "))
-            set_text(text)
-            logger.info("LaTeX published to clipboard top")
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Error during clipboard publish: %s", exc)
-
-    threading.Thread(target=worker, name="platex-clipboard-publisher", daemon=True).start()
+    try:
+        logger.debug("Publishing to clipboard: %s", text[:100].replace("\n", " "))
+        set_text(text)
+        logger.info("LaTeX published to clipboard top")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Error during clipboard publish: %s", exc)

@@ -7,6 +7,7 @@ import time
 
 from PIL import Image, ImageGrab
 
+from .windows_clipboard import set_text
 from .models import ClipboardImage
 
 
@@ -34,11 +35,4 @@ def image_hash(image_bytes: bytes) -> str:
 
 
 def copy_text_to_clipboard(text: str) -> None:
-    import tkinter as tk
-
-    root = tk.Tk()
-    root.withdraw()
-    root.clipboard_clear()
-    root.clipboard_append(text)
-    root.update()
-    root.destroy()
+    set_text(text)
