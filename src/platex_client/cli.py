@@ -35,7 +35,26 @@ from .windows_clipboard import publish_text_to_clipboard
 
 
 def _default_script_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "scripts" / "glm_vision_ocr.py"
+    script_name = Path("scripts") / "glm_vision_ocr.py"
+
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        # 1) Beside exe: release/PLatexClient-0.1.0/scripts/glm_vision_ocr.py
+        candidates.append(Path(sys.executable).resolve().parent / script_name)
+        # 2) PyInstaller temp extraction dir (when bundled with add-data)
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(Path(meipass) / script_name)
+
+    # 3) Source tree fallback for dev mode
+    candidates.append(Path(__file__).resolve().parents[2] / script_name)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    # Keep deterministic error path if nothing exists
+    return candidates[0]
 
 
 def _acquire_single_instance_lock() -> bool:
@@ -66,6 +85,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--log-file", type=Path, default=None, help=f"Optional log file path. Default: {default_log_path()}")
     parser.add_argument("--interval", type=float, default=None, help="Polling interval in seconds.")
     parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="Strong isolation mode: disable background polling and run OCR only when manually triggered.",
+    )
+    parser.add_argument(
         "--publish-latex",
         action="store_true",
         help="Publish OCR text directly to the top of the Windows clipboard history.",
@@ -86,6 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("latest", help="Show the latest OCR result.")
     subparsers.add_parser("copy-latest", help="Copy the latest OCR result to the clipboard.")
+    subparsers.add_parser("once", help="Run OCR once on the current clipboard image.")
     logs_parser = subparsers.add_parser("logs", help="Show recent log lines.")
     logs_parser.add_argument("--limit", type=int, default=50)
     return parser
@@ -101,6 +126,7 @@ def _resolve_runtime_config(args: argparse.Namespace):
         "log_file": args.log_file or config.log_file or default_log_path(),
         "interval": args.interval if args.interval is not None else config.interval,
         "publish_latex": args.publish_latex or config.publish_latex,
+        "isolate_mode": args.isolate or config.isolate_mode,
         "restore_delay": args.restore_delay if args.restore_delay is not None else config.restore_delay,
     }
 
@@ -150,6 +176,7 @@ def _tray(args: argparse.Namespace) -> int:
         script_path=runtime["script"],
         interval=runtime["interval"],
         publish_latex=runtime["publish_latex"],
+        isolate_mode=runtime["isolate_mode"],
         restore_delay=runtime["restore_delay"],
     )
     history = HistoryStore(runtime["db_path"])
@@ -207,6 +234,27 @@ def _print_logs(runtime: dict[str, object], limit: int) -> int:
     return 0
 
 
+def _once(args: argparse.Namespace) -> int:
+    runtime = _resolve_runtime_config(args)
+    setup_logging(runtime["log_file"])
+
+    app = PlatexApp(
+        db_path=runtime["db_path"],
+        script_path=runtime["script"],
+        interval=runtime["interval"],
+        publish_latex=runtime["publish_latex"],
+        isolate_mode=True,
+        restore_delay=runtime["restore_delay"],
+    )
+    event = app.run_once()
+    if event is None:
+        print("No clipboard image found.")
+        return 1
+
+    _print_event("Captured", event)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     if argv is None:
@@ -224,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         return _tray(args)
     if args.command == "logs":
         return _print_logs(runtime, args.limit)
+    if args.command == "once":
+        return _once(args)
 
     history = HistoryStore(runtime["db_path"])
     if args.command == "history":
