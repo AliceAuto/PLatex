@@ -4,9 +4,11 @@ import argparse
 import time
 from pathlib import Path
 
+from .app import PlatexApp
 from .clipboard import copy_text_to_clipboard
 from .history import HistoryStore
 from .loader import load_script_processor
+from .tray import TrayController
 from .watcher import ClipboardWatcher
 
 
@@ -22,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve", help="Start clipboard monitoring.")
+    subparsers.add_parser("tray", help="Start clipboard monitoring in system tray mode.")
 
     history_parser = subparsers.add_parser("history", help="Show recent OCR history.")
     history_parser.add_argument("--limit", type=int, default=10)
@@ -54,6 +57,14 @@ def _serve(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         print("Stopped.")
     return 0
+
+
+def _tray(args: argparse.Namespace) -> int:
+    app = PlatexApp(db_path=args.db_path, script_path=args.script, interval=args.interval)
+    history = HistoryStore(args.db_path)
+    controller = TrayController(app=app, history=history)
+    print(f"Starting tray mode. Mounted script: {args.script}")
+    return controller.run()
 
 
 def _print_history(history: HistoryStore, limit: int) -> int:
@@ -100,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         return _serve(args)
+    if args.command == "tray":
+        return _tray(args)
     if args.command == "history":
         return _print_history(history, args.limit)
     if args.command == "latest":

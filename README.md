@@ -46,6 +46,14 @@ pip install -e .
 platex-client serve
 ```
 
+托盘常驻：
+
+```bash
+platex-client tray
+```
+
+托盘模式会在 Windows 右下角显示图标，后台持续监听剪贴板，菜单里可以复制最新 LaTeX 或退出。
+
 查看最近历史：
 
 ```bash
