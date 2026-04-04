@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import os
 import queue
@@ -11,9 +10,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from platformdirs import user_config_dir
+import yaml
 
 from .app import PlatexApp
+from .config import default_config_path
 from .history import HistoryStore
 from .models import ClipboardEvent
 
@@ -41,31 +41,59 @@ def _build_icon_image():
     return image
 
 
-def _private_config_path() -> Path:
-    config_dir = Path(user_config_dir("PLatexClient", "Copilot"))
-    config_dir.mkdir(parents=True, exist_ok=True)
-    return config_dir / "private_config.json"
+def _panel_config_path() -> Path:
+    path = default_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def _load_private_config(default_script: Path) -> dict[str, Any]:
-    path = _private_config_path()
+def _load_panel_config(default_script: Path) -> dict[str, Any]:
+    path = _panel_config_path()
+    payload: dict[str, Any] = {}
     if path.exists():
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                return payload
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                payload = loaded
         except Exception:
-            pass
+            payload = {}
+
+    script_val = payload.get("script")
+    active_script = str(default_script)
+    if isinstance(script_val, str) and script_val.strip():
+        active_script = script_val
+
+    mounted_scripts = payload.get("mounted_scripts")
+    if not isinstance(mounted_scripts, list):
+        mounted_scripts = [active_script]
+    mounted_scripts = [str(x) for x in mounted_scripts if isinstance(x, str) and x.strip()]
+    if active_script not in mounted_scripts:
+        mounted_scripts.append(active_script)
+
+    private_env = payload.get("private_env")
+    if not isinstance(private_env, dict):
+        private_env = {}
+
     return {
-        "auto_start": False,
-        "active_script": str(default_script),
-        "mounted_scripts": [str(default_script)],
-        "private_env": {},
+        "db_path": payload.get("db_path") or "",
+        "script": active_script,
+        "log_file": payload.get("log_file") or "",
+        "interval": float(payload.get("interval", 0.8)),
+        "isolate_mode": bool(payload.get("isolate_mode", False)),
+        "glm_api_key": payload.get("glm_api_key") or "",
+        "glm_model": payload.get("glm_model") or "",
+        "glm_base_url": payload.get("glm_base_url") or "",
+        "mounted_scripts": mounted_scripts,
+        "private_env": {str(k): str(v) for k, v in private_env.items() if isinstance(k, str) and isinstance(v, str)},
+        "auto_start": bool(payload.get("auto_start", False)),
+        "ui_language": str(payload.get("ui_language", "en")),
+        "language_pack": str(payload.get("language_pack", "")),
     }
 
 
-def _save_private_config(payload: dict[str, Any]) -> None:
-    _private_config_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+def _save_panel_config(payload: dict[str, Any]) -> None:
+    clean = {k: v for k, v in payload.items() if v not in (None, "")}
+    _panel_config_path().write_text(yaml.safe_dump(clean, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
 def _startup_command() -> str:
@@ -142,11 +170,11 @@ class TrayController:
         pystray, Menu, MenuItem = _load_pystray()
         previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
-        private_cfg = _load_private_config(self.app.script_path)
+        private_cfg = _load_panel_config(self.app.script_path)
         mounted_scripts = [str(Path(p)) for p in private_cfg.get("mounted_scripts", []) if isinstance(p, str)]
         if str(self.app.script_path) not in mounted_scripts:
             mounted_scripts.append(str(self.app.script_path))
-        active_script_raw = private_cfg.get("active_script")
+        active_script_raw = private_cfg.get("script")
         active_script = Path(active_script_raw) if isinstance(active_script_raw, str) and active_script_raw else self.app.script_path
         if active_script.exists():
             self.app.script_path = active_script
@@ -175,6 +203,7 @@ class TrayController:
                     QMessageBox,
                     QPlainTextEdit,
                     QPushButton,
+                    QDoubleSpinBox,
                     QVBoxLayout,
                     QWidget,
                 )
@@ -278,8 +307,12 @@ class TrayController:
                     root.setSpacing(10)
 
                     self.auto_start = QCheckBox("开机自启")
-                    self.auto_start.setChecked(_is_startup_enabled())
+                    self.auto_start.setChecked(_is_startup_enabled() or bool(private_cfg.get("auto_start", False)))
                     root.addWidget(self.auto_start)
+
+                    root.addWidget(QLabel("数据库路径（db_path）"))
+                    self.db_path = QLineEdit(str(private_cfg.get("db_path", "")))
+                    root.addWidget(self.db_path)
 
                     root.addWidget(QLabel("当前挂载脚本"))
                     script_row = QHBoxLayout()
@@ -312,6 +345,35 @@ class TrayController:
                             env_lines.append(f"{k}={v}")
                     self.private_env_text.setPlainText("\n".join(env_lines))
                     root.addWidget(self.private_env_text)
+
+                    root.addWidget(QLabel("日志路径（log_file）"))
+                    self.log_file = QLineEdit(str(private_cfg.get("log_file", "")))
+                    root.addWidget(self.log_file)
+
+                    interval_row = QHBoxLayout()
+                    interval_row.addWidget(QLabel("轮询间隔（interval）"))
+                    self.interval = QDoubleSpinBox()
+                    self.interval.setRange(0.1, 10.0)
+                    self.interval.setSingleStep(0.1)
+                    self.interval.setValue(float(private_cfg.get("interval", 0.8)))
+                    interval_row.addWidget(self.interval)
+                    root.addLayout(interval_row)
+
+                    self.isolate_mode = QCheckBox("强隔离模式（isolate_mode）")
+                    self.isolate_mode.setChecked(bool(private_cfg.get("isolate_mode", False)))
+                    root.addWidget(self.isolate_mode)
+
+                    root.addWidget(QLabel("GLM API Key（glm_api_key）"))
+                    self.glm_api_key = QLineEdit(str(private_cfg.get("glm_api_key", "")))
+                    root.addWidget(self.glm_api_key)
+
+                    root.addWidget(QLabel("GLM Model（glm_model）"))
+                    self.glm_model = QLineEdit(str(private_cfg.get("glm_model", "")))
+                    root.addWidget(self.glm_model)
+
+                    root.addWidget(QLabel("GLM Base URL（glm_base_url）"))
+                    self.glm_base_url = QLineEdit(str(private_cfg.get("glm_base_url", "")))
+                    root.addWidget(self.glm_base_url)
 
                     action_row = QHBoxLayout()
                     btn_save = QPushButton("保存并应用")
@@ -363,23 +425,38 @@ class TrayController:
 
                         payload = {
                             "auto_start": bool(self.auto_start.isChecked()),
-                            "active_script": str(chosen),
+                            "db_path": self.db_path.text().strip(),
+                            "script": str(chosen),
+                            "log_file": self.log_file.text().strip(),
+                            "interval": float(self.interval.value()),
+                            "isolate_mode": bool(self.isolate_mode.isChecked()),
+                            "glm_api_key": self.glm_api_key.text().strip(),
+                            "glm_model": self.glm_model.text().strip(),
+                            "glm_base_url": self.glm_base_url.text().strip(),
                             "mounted_scripts": scripts,
                             "private_env": env_map,
                         }
                         try:
-                            _save_private_config(payload)
+                            _save_panel_config(payload)
                         except Exception as exc:  # noqa: BLE001
                             QMessageBox.warning(self, "保存失败", str(exc))
                             return
 
                         for k, v in env_map.items():
                             os.environ[k] = v
+                        if payload["glm_api_key"]:
+                            os.environ["GLM_API_KEY"] = str(payload["glm_api_key"])
+                        if payload["glm_model"]:
+                            os.environ["GLM_MODEL"] = str(payload["glm_model"])
+                        if payload["glm_base_url"]:
+                            os.environ["GLM_BASE_URL"] = str(payload["glm_base_url"])
 
                         try:
                             was_running = controller.app._worker is not None and controller.app._worker.is_alive()
                             controller.app.stop()
                             controller.app.script_path = chosen
+                            controller.app.interval = float(payload["interval"])
+                            controller.app.isolate_mode = bool(payload["isolate_mode"])
                             controller.app._watcher = None
                             controller.app._stop_event.clear()
                             if was_running:
