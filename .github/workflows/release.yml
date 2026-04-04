@@ -37,12 +37,16 @@ jobs:
 
       - name: Build executable
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --name platex-client --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --collect-submodules PyQt6 --collect-data PyQt6 --collect-binaries PyQt6 launcher.py
+          python -m PyInstaller --noconfirm --clean --onedir --contents-directory . --name platex-client --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --collect-submodules PyQt6 --collect-data PyQt6 --collect-binaries PyQt6 launcher.py
 
       - name: Verify bundled runtime files
         run: |
           if (!(Test-Path "dist/platex-client/platex-client.exe")) { throw "Missing dist/platex-client/platex-client.exe" }
-          if (!(Test-Path "dist/platex-client/scripts/glm_vision_ocr.py")) { throw "Missing bundled script file" }
+          $scriptPath = "dist/platex-client/scripts/glm_vision_ocr.py"
+          if (!(Test-Path $scriptPath)) {
+            $fallbackScriptPath = "dist/platex-client/_internal/scripts/glm_vision_ocr.py"
+            if (!(Test-Path $fallbackScriptPath)) { throw "Missing bundled script file" }
+          }
 
       - name: Build Inno Setup installer
         run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" platex-client.iss'
