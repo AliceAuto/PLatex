@@ -1,124 +1,196 @@
 # PLatex Client
 
-PLatex Client 是一个 Windows 剪贴板助手，用来挂载“图片 -> LaTeX”的脚本。
+PLatex Client 是一个 Windows 剪贴板助手，用来把图片中的数学公式或文本识别成 LaTeX，并自动放到系统剪贴板顶部。
 
-它会持续监听剪贴板：如果当前内容是图片，就调用你挂载的 OCR 脚本把图片转成 LaTeX，并把结果保存在本地历史里作为“第二份内容”。整个过程不会覆盖系统剪贴板，所以 `Ctrl+V` 仍然粘贴原图。
+识别成功后，结果会自动写入系统剪贴板，方便你直接 `Ctrl+V` 粘贴；同时也会保存到本地历史库，便于查看最近结果。
 
-## 当前实现
+## 主要功能
 
-- 监听 Windows 剪贴板中的图片内容
-- 通过可插拔脚本完成 OCR 到 LaTeX
-- 将识别结果保存到本地 SQLite 历史库
-- 提供查看最近结果、复制最近结果的命令
+- 监听 Windows 剪贴板中的图片
+- 使用可插拔 OCR 脚本把图片转成 LaTeX 或文本
+- OCR 成功后自动把结果写入系统剪贴板顶部
+- 支持托盘常驻、历史查看、最近结果复制
+- 支持自动模式和手动隔离模式
 
-## 目录结构
+## 运行方式
 
-- `src/platex_client/`：客户端核心代码
-- `scripts/glm_vision_ocr.py`：默认挂载脚本示例
-- `tests/`：基础单元测试
-
-## 安装
+### 1. 安装
 
 需要 Python 3.10+。
 
-```bash
+```powershell
 pip install -e .
 ```
 
-## 配置脚本
+### 2. 启动自动监听模式
 
-默认脚本使用 GLM 视觉模型（智谱开放平台）。请先设置环境变量：
+默认模式会自动监听剪贴板图片，识别成功后自动写入剪贴板：
 
-- `GLM_API_KEY`
+```powershell
+platex-client tray
+```
 
-可选环境变量：
+如果你想直接运行模块，也可以：
 
-- `GLM_MODEL`（默认：`glm-4.1v-thinking-flash`）
-- `GLM_BASE_URL`（默认：`https://open.bigmodel.cn/api/paas/v4/chat/completions`）
+```powershell
+python -m platex_client.cli tray
+```
 
-如果你想换成自己的脚本，可以实现一个 `process_image(image_bytes, context)` 函数，然后启动时通过 `--script` 指向它。
+### 3. 手动隔离模式
 
-## 配置文件
+如果你不想后台自动轮询，可以启用强隔离模式。此时不会自动 OCR，只会在托盘菜单里手动触发一次：
 
-除了环境变量，你也可以放一个本地 YAML 配置文件。默认路径是：
+```powershell
+platex-client --isolate tray
+```
+
+托盘菜单里的 `OCR once now` 会执行一次识别，并把结果写入系统剪贴板顶部。
+
+### 4. 单次 OCR
+
+只对当前剪贴板图片识别一次，然后退出：
+
+```powershell
+platex-client --isolate once
+```
+
+## 命令说明
+
+```powershell
+platex-client tray
+platex-client serve
+platex-client once
+platex-client history --limit 10
+platex-client latest
+platex-client copy-latest
+platex-client logs --limit 50
+```
+
+- `tray`：托盘模式，适合常驻使用
+- `serve`：命令行轮询模式
+- `once`：对当前剪贴板图片只识别一次
+- `history`：查看最近 OCR 历史
+- `latest`：查看最新一条识别结果
+- `copy-latest`：把最新结果复制到剪贴板
+- `logs`：查看最近日志
+
+## OCR 结果如何输出
+
+默认情况下，OCR 成功后会：
+
+1. 将识别结果写入系统剪贴板顶部
+2. 保留本地历史记录
+3. 弹出成功提示窗口
+
+注意：当前实现不会把图片回写到剪贴板，因此不会再出现“识别后图片被恢复”的行为。
+
+## 配置
+
+程序支持 YAML 配置文件。
+
+默认配置路径：
 
 - `%APPDATA%\PLatexClient\config.yaml`
 
 你也可以手动指定：
 
-```bash
+```powershell
 platex-client tray --config C:\path\to\config.yaml
 ```
 
-示例：
+配置示例：
 
 ```yaml
 glm_api_key: your-api-key
 glm_model: glm-4.1v-thinking-flash
 glm_base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
-log_file: C:/Users/your-name/AppData/Roaming/PLatexClient/logs/platex-client.log
 publish_latex: true
+isolate_mode: false
 restore_delay: 0.25
 interval: 0.8
 ```
 
-优先级规则是：命令行参数 > 环境变量 > 配置文件 > 默认值。
+优先级规则：
 
-## 运行
+1. 命令行参数
+2. 环境变量
+3. 配置文件
+4. 默认值
 
-启动监听：
+### 环境变量
 
-```bash
-platex-client serve
+默认 OCR 脚本使用 GLM 视觉模型，常用环境变量：
+
+- `GLM_API_KEY`
+- `GLM_MODEL`
+- `GLM_BASE_URL`
+
+## 默认 OCR 脚本
+
+默认挂载脚本位于：
+
+- `scripts/glm_vision_ocr.py`
+
+你也可以自行实现一个脚本，只要提供下面这个函数即可：
+
+```python
+def process_image(image_bytes, context=None):
+    ...
 ```
 
-托盘常驻：
+然后通过 `--script` 指定你的脚本路径。
 
-```bash
-platex-client tray --publish-latex
-```
+## 日志与历史
 
-托盘模式会在 Windows 右下角显示图标，后台持续监听剪贴板，菜单里可以复制最新 LaTeX 或退出。
-
-日志文件默认写到：
+日志默认写到：
 
 - `%APPDATA%\PLatexClient\logs\platex-client.log`
 
-你也可以在终端直接看最近日志：
+历史默认保存到：
 
-```bash
+- `%APPDATA%\PLatexClient\history.sqlite3`
+
+查看日志：
+
+```powershell
 platex-client logs --limit 50
 ```
 
-如果你开启 `--publish-latex`，程序会在识别后把 LaTeX 短暂写入系统剪贴板历史，再自动恢复原图。这样你可以在 `Win+V` 里看到公式，但极短时间内执行 `Ctrl+V` 仍然有可能粘贴到 LaTeX；如果你非常在意原图粘贴，就不要开启这个开关。
+查看历史：
 
-查看最近历史：
-
-```bash
-platex-client history
+```powershell
+platex-client history --limit 20
 ```
 
-查看最新一条：
+## 打包与发布
+
+仓库里已经配置了 GitHub Actions：
+
+- [构建工作流](.github/workflows/build.yml)
+- [发布工作流](.github/workflows/release.yml)
+
+其中：
+
+- `build.yml` 用于自动构建并上传 artifact
+- `release.yml` 会在推送 `v*` tag 时自动构建并创建 GitHub Release
+
+例如：
 
 ```bash
-platex-client latest
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
-把最新 LaTeX 复制到剪贴板：
+## 目录结构
 
-```bash
-platex-client copy-latest
-```
+- `src/platex_client/`：客户端核心代码
+- `scripts/glm_vision_ocr.py`：默认 OCR 脚本示例
+- `tests/`：基础测试
+- `.github/workflows/`：GitHub Actions 构建和发布流程
 
-## 行为说明
+## 说明
 
-- 只读剪贴板，不会把图片剪贴板改成文本
-- OCR 结果保存在本地数据库中，作为第二份内容
-- 如果脚本失败，会把错误写入历史，方便排查
-
-## 你接下来可以做的事
-
-1. 换成你自己的 OCR 脚本
-2. 把客户端做成托盘程序
-3. 增加全局热键，把“第二份内容”快速贴出来
-
+- 自动模式下，程序会持续监听剪贴板图片并自动 OCR
+- 强隔离模式下，不会后台监听，只能手动触发一次 OCR
+- OCR 成功后，结果会直接放到系统剪贴板顶部，便于粘贴
+- 如果脚本失败，错误会写入历史，便于排查
