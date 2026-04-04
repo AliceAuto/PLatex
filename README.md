@@ -1,14 +1,14 @@
 # PLatex Client
 
-PLatex Client 是一个 Windows 剪贴板助手，用来把图片中的数学公式或文本识别成 LaTeX，并自动放到系统剪贴板顶部。
+PLatex Client 是一个 Windows 剪贴板助手，用来把图片中的数学公式或文本识别成 LaTeX，并通过可点击弹窗把结果复制到系统剪贴板。
 
-识别成功后，结果会自动写入系统剪贴板，方便你直接 `Ctrl+V` 粘贴；同时也会保存到本地历史库，便于查看最近结果。
+识别成功后，结果会先弹出窗口；你点击弹窗或按钮后，公式才会复制到系统剪贴板。同时也会保存到本地历史库，便于查看最近结果。
 
 ## 主要功能
 
 - 监听 Windows 剪贴板中的图片
 - 使用可插拔 OCR 脚本把图片转成 LaTeX 或文本
-- OCR 成功后自动把结果写入系统剪贴板顶部
+- OCR 成功后弹出结果窗口，点击弹窗即可复制公式
 - 支持托盘常驻、历史查看、最近结果复制
 - 支持自动模式和手动隔离模式
 
@@ -24,7 +24,7 @@ pip install -e .
 
 ### 2. 启动自动监听模式
 
-默认模式会自动监听剪贴板图片，识别成功后自动写入剪贴板：
+默认模式会自动监听剪贴板图片，识别成功后弹出可点击窗口：
 
 ```powershell
 platex-client tray
@@ -44,7 +44,7 @@ python -m platex_client.cli tray
 platex-client --isolate tray
 ```
 
-托盘菜单里的 `OCR once now` 会执行一次识别，并把结果写入系统剪贴板顶部。
+托盘菜单里的 `OCR once now` 会执行一次识别，并弹出结果窗口；点击窗口即可复制公式。
 
 ### 4. 单次 OCR
 
@@ -80,9 +80,9 @@ platex-client logs --limit 50
 
 1. 将识别结果写入系统剪贴板顶部
 2. 保留本地历史记录
-3. 弹出成功提示窗口
+3. 弹出成功提示窗口，点击后复制公式
 
-注意：当前实现不会把图片回写到剪贴板，因此不会再出现“识别后图片被恢复”的行为。
+注意：当前实现不会把图片回写到剪贴板，也不会自动把识别结果直接写入剪贴板；需要点击成功弹窗后再复制。
 
 ## 配置
 
@@ -104,7 +104,6 @@ platex-client tray --config C:\path\to\config.yaml
 glm_api_key: your-api-key
 glm_model: glm-4.1v-thinking-flash
 glm_base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
-publish_latex: true
 isolate_mode: false
 restore_delay: 0.25
 interval: 0.8

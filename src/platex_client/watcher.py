@@ -17,7 +17,6 @@ class ClipboardWatcher:
     processor: OcrProcessor
     history: HistoryStore
     source_name: str
-    on_success: Callable[[str], None] | None = None
     last_image_hash: str | None = None
     last_image_time: float | None = None
     last_publish_time: float | None = None
@@ -113,8 +112,4 @@ class ClipboardWatcher:
             self.ocr_start_time = None  # Mark OCR as completed
 
         self.history.add(event)
-        if event.status == "ok" and self.on_success is not None:
-            self.logger.info("Publishing LaTeX to clipboard hash=%s latex_len=%s", current_hash[:10], len(event.latex))
-            self.last_publish_time = time.time()  # Record publish time to skip restore echoes
-            self.on_success(event.latex)
         return event

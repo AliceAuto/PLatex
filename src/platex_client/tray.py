@@ -45,7 +45,7 @@ class TrayController:
         pystray, Menu, MenuItem = _load_pystray()
         previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
-        def show_fallback_popup(title: str, message: str, timeout_ms: int = 3200) -> None:
+        def show_click_to_copy_popup(title: str, latex: str, timeout_ms: int = 12000) -> None:
             def worker() -> None:
                 try:
                     import tkinter as tk
@@ -57,8 +57,8 @@ class TrayController:
 
                     # Place near bottom-right corner like a toast.
                     root.update_idletasks()
-                    width = 520
-                    height = 120
+                    width = 620
+                    height = 180
                     x = max(0, root.winfo_screenwidth() - width - 24)
                     y = max(0, root.winfo_screenheight() - height - 72)
                     root.geometry(f"{width}x{height}+{x}+{y}")
@@ -66,14 +66,52 @@ class TrayController:
                     frame = tk.Frame(root, padx=12, pady=10)
                     frame.pack(fill="both", expand=True)
                     tk.Label(frame, text=title, font=("Segoe UI", 11, "bold"), anchor="w").pack(fill="x")
-                    tk.Label(
+                    preview = latex.replace("\n", " ").strip()
+                    if len(preview) > 220:
+                        preview = preview[:217] + "..."
+                    message_label = tk.Label(
                         frame,
-                        text=message,
+                        text=preview or "OCR completed",
                         justify="left",
                         anchor="w",
-                        wraplength=490,
+                        wraplength=580,
                         font=("Segoe UI", 10),
-                    ).pack(fill="both", expand=True, pady=(6, 0))
+                    )
+                    message_label.pack(fill="both", expand=True, pady=(6, 0))
+                    status_label = tk.Label(
+                        frame,
+                        text="点击弹窗任意位置复制公式",
+                        justify="left",
+                        anchor="w",
+                        wraplength=580,
+                        font=("Segoe UI", 9),
+                        fg="#666666",
+                    )
+                    status_label.pack(fill="x", pady=(0, 6))
+
+                    copied = {"done": False}
+
+                    def copy_and_close(_event=None) -> None:
+                        if copied["done"]:
+                            return
+                        try:
+                            copy_text_to_clipboard(latex)
+                            copied["done"] = True
+                            status_label.config(text="已复制到剪贴板")
+                            logger.info("Copied OCR result from popup")
+                            root.after(500, root.destroy)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.exception("Popup copy failed: %s", exc)
+                            status_label.config(text="复制失败，请重试")
+
+                    root.bind("<Button-1>", copy_and_close)
+                    frame.bind("<Button-1>", copy_and_close)
+                    message_label.bind("<Button-1>", copy_and_close)
+                    status_label.bind("<Button-1>", copy_and_close)
+
+                    button_row = tk.Frame(frame)
+                    button_row.pack(fill="x")
+                    tk.Button(button_row, text="点击复制", command=copy_and_close).pack(side="right")
 
                     root.after(timeout_ms, root.destroy)
                     root.mainloop()
@@ -102,14 +140,7 @@ class TrayController:
             icon.title = show_status()
 
         def notify_success(event: ClipboardEvent) -> None:
-            preview = event.latex.replace("\n", " ").strip()
-            if len(preview) > 120:
-                preview = preview[:117] + "..."
-            if not preview:
-                preview = "OCR completed"
-
-            # Show exactly one visible popup for OCR success.
-            show_fallback_popup("PLatex OCR Success", preview)
+            show_click_to_copy_popup("PLatex OCR Success", event.latex)
             logger.info("OCR success popup emitted hash=%s", event.image_hash[:10])
 
         def copy_latest(_icon, _item) -> None:

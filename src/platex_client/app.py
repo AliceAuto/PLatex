@@ -11,7 +11,6 @@ from .history import HistoryStore
 from .loader import load_script_processor
 from .models import ClipboardEvent
 from .watcher import ClipboardWatcher
-from .windows_clipboard import publish_text_to_clipboard
 
 
 @dataclass(slots=True)
@@ -19,7 +18,6 @@ class PlatexApp:
     db_path: Path | None
     script_path: Path
     interval: float = 0.8
-    publish_latex: bool = False
     isolate_mode: bool = False
     restore_delay: float = 0.25
     on_ocr_success: Callable[[ClipboardEvent], None] | None = None
@@ -36,7 +34,6 @@ class PlatexApp:
                 processor=processor,
                 history=history,
                 source_name=str(self.script_path),
-                on_success=publish_text_to_clipboard if self.publish_latex else None,
             )
         return self._watcher
 
@@ -44,7 +41,7 @@ class PlatexApp:
         if self._worker is not None and self._worker.is_alive():
             return
 
-        self.logger.info("Starting background watcher script=%s interval=%s publish_latex=%s", self.script_path, self.interval, self.publish_latex)
+        self.logger.info("Starting background watcher script=%s interval=%s", self.script_path, self.interval)
 
         if self.isolate_mode:
             self._ensure_watcher()

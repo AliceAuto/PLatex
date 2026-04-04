@@ -31,7 +31,6 @@ from .loader import load_script_processor
 from .logging_utils import setup_logging
 from .tray import TrayController
 from .watcher import ClipboardWatcher
-from .windows_clipboard import publish_text_to_clipboard
 
 
 def _default_script_path() -> Path:
@@ -145,7 +144,6 @@ def _resolve_runtime_config(args: argparse.Namespace):
         "script": args.script or config.script or _default_script_path(),
         "log_file": args.log_file or config.log_file or default_log_path(),
         "interval": args.interval if args.interval is not None else config.interval,
-        "publish_latex": args.publish_latex or config.publish_latex,
         "isolate_mode": args.isolate or config.isolate_mode,
         "restore_delay": args.restore_delay if args.restore_delay is not None else config.restore_delay,
     }
@@ -168,7 +166,6 @@ def _serve(args: argparse.Namespace) -> int:
         processor=processor,
         history=history,
         source_name=str(runtime["script"]),
-        on_success=publish_text_to_clipboard if runtime["publish_latex"] else None,
     )
 
     print(f"Watching clipboard. Mounted script: {runtime['script']}")
@@ -196,7 +193,6 @@ def _tray(args: argparse.Namespace) -> int:
             db_path=runtime["db_path"],
             script_path=runtime["script"],
             interval=runtime["interval"],
-            publish_latex=runtime["publish_latex"],
             isolate_mode=runtime["isolate_mode"],
             restore_delay=runtime["restore_delay"],
         )
@@ -265,7 +261,6 @@ def _once(args: argparse.Namespace) -> int:
         db_path=runtime["db_path"],
         script_path=runtime["script"],
         interval=runtime["interval"],
-        publish_latex=runtime["publish_latex"],
         isolate_mode=True,
         restore_delay=runtime["restore_delay"],
     )

@@ -1,7 +1,6 @@
 glm_api_key: 17ede634b36b4c40946f1daf5c2d8407.1UPvth0VoNmJNmQ8
 glm_model: glm-4.1v-thinking-flash
 glm_base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
-publish_latex: true
 isolate_mode: false
 restore_delay: 0.25
 interval: 0.8
