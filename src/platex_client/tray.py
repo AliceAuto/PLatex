@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,6 +38,7 @@ class TrayController:
     history: HistoryStore
 
     def run(self) -> int:
+        logger = logging.getLogger("platex.tray")
         pystray, Menu, MenuItem = _load_pystray()
 
         def show_status() -> str:
@@ -52,11 +54,13 @@ class TrayController:
             if latest is None or latest.status != "ok" or not latest.latex.strip():
                 return
             copy_text_to_clipboard(latest.latex)
+            logger.info("Copied latest LaTeX from tray menu")
 
         def refresh(_icon, _item) -> None:
             icon.title = show_status()
 
         def quit_app(icon, _item) -> None:
+            logger.info("Tray exit requested")
             self.app.stop()
             icon.stop()
 
@@ -69,6 +73,10 @@ class TrayController:
         self.app.start()
         try:
             icon.run()
+        except KeyboardInterrupt:
+            logger.info("Tray interrupted by keyboard")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Error in tray main loop: %s", exc)
         finally:
             self.app.stop()
         return 0

@@ -38,6 +38,32 @@ pip install -e .
 
 如果你想换成自己的脚本，可以实现一个 `process_image(image_bytes, context)` 函数，然后启动时通过 `--script` 指向它。
 
+## 配置文件
+
+除了环境变量，你也可以放一个本地 YAML 配置文件。默认路径是：
+
+- `%APPDATA%\PLatexClient\config.yaml`
+
+你也可以手动指定：
+
+```bash
+platex-client tray --config C:\path\to\config.yaml
+```
+
+示例：
+
+```yaml
+glm_api_key: your-api-key
+glm_model: glm-4.1v-thinking-flash
+glm_base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+log_file: C:/Users/your-name/AppData/Roaming/PLatexClient/logs/platex-client.log
+publish_latex: true
+restore_delay: 0.25
+interval: 0.8
+```
+
+优先级规则是：命令行参数 > 环境变量 > 配置文件 > 默认值。
+
 ## 运行
 
 启动监听：
@@ -49,10 +75,22 @@ platex-client serve
 托盘常驻：
 
 ```bash
-platex-client tray
+platex-client tray --publish-latex
 ```
 
 托盘模式会在 Windows 右下角显示图标，后台持续监听剪贴板，菜单里可以复制最新 LaTeX 或退出。
+
+日志文件默认写到：
+
+- `%APPDATA%\PLatexClient\logs\platex-client.log`
+
+你也可以在终端直接看最近日志：
+
+```bash
+platex-client logs --limit 50
+```
+
+如果你开启 `--publish-latex`，程序会在识别后把 LaTeX 短暂写入系统剪贴板历史，再自动恢复原图。这样你可以在 `Win+V` 里看到公式，但极短时间内执行 `Ctrl+V` 仍然有可能粘贴到 LaTeX；如果你非常在意原图粘贴，就不要开启这个开关。
 
 查看最近历史：
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import dataclass, field
@@ -8,6 +9,7 @@ from pathlib import Path
 from .history import HistoryStore
 from .loader import load_script_processor
 from .watcher import ClipboardWatcher
+from .windows_clipboard import publish_text_to_clipboard
 
 
 @dataclass(slots=True)
@@ -15,26 +17,56 @@ class PlatexApp:
     db_path: Path | None
     script_path: Path
     interval: float = 0.8
+    publish_latex: bool = False
+    isolate_mode: bool = False
+    restore_delay: float = 0.25
     _stop_event: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     _worker: threading.Thread | None = field(default=None, init=False, repr=False)
+    _watcher: ClipboardWatcher | None = field(default=None, init=False, repr=False)
+    logger: logging.Logger = field(default_factory=lambda: logging.getLogger("platex.app"), init=False, repr=False)
+
+    def _ensure_watcher(self) -> ClipboardWatcher:
+        if self._watcher is None:
+            history = HistoryStore(self.db_path)
+            processor = load_script_processor(self.script_path)
+            self._watcher = ClipboardWatcher(
+                processor=processor,
+                history=history,
+                source_name=str(self.script_path),
+                on_success=publish_text_to_clipboard if self.publish_latex else None,
+            )
+        return self._watcher
 
     def start(self) -> None:
         if self._worker is not None and self._worker.is_alive():
             return
 
-        history = HistoryStore(self.db_path)
-        processor = load_script_processor(self.script_path)
-        watcher = ClipboardWatcher(processor=processor, history=history, source_name=str(self.script_path))
+        self.logger.info("Starting background watcher script=%s interval=%s publish_latex=%s", self.script_path, self.interval, self.publish_latex)
+
+        if self.isolate_mode:
+            self._ensure_watcher()
+            self.logger.info("Isolation mode enabled: background polling is disabled")
+            return
+
+        watcher = self._ensure_watcher()
 
         def run() -> None:
             while not self._stop_event.is_set():
-                watcher.poll_once()
+                try:
+                    watcher.poll_once()
+                except Exception as exc:  # noqa: BLE001
+                    self.logger.exception("Error in clipboard poll loop: %s", exc)
                 self._stop_event.wait(self.interval)
 
         self._worker = threading.Thread(target=run, name="platex-watcher", daemon=True)
         self._worker.start()
 
+    def run_once(self):
+        watcher = self._ensure_watcher()
+        return watcher.poll_once()
+
     def stop(self) -> None:
+        self.logger.info("Stopping background watcher")
         self._stop_event.set()
         if self._worker is not None:
             self._worker.join(timeout=2.0)

@@ -31,8 +31,15 @@ def process_image(image_bytes: bytes, context: dict[str, object] | None = None) 
 
     image_base64 = base64.b64encode(image_bytes).decode("ascii")
     prompt = (
-        "You are a math OCR assistant. Read the image and output only valid LaTeX. "
-        "Do not add explanation, markdown fences, or extra text."
+        "Read the image content and respond according to these rules:\n"
+        "1. If the image contains mathematical formulas or equations:\n"
+        "   - For inline formulas: wrap in $...$ delimiters\n"
+        "   - For display/block formulas: wrap in $$...$$ delimiters\n"
+        "   - Output only valid LaTeX code inside the delimiters\n"
+        "2. If the image contains text without formulas: output the text as-is\n"
+        "3. For mixed content (text + formulas): output text with formulas wrapped in $ or $$\n"
+        "4. Do NOT add markdown fences, code blocks, explanations, or any meta-text\n"
+        "5. Output only the content itself"
     )
 
     payload = {
