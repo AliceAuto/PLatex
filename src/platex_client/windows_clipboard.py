@@ -12,8 +12,8 @@ logger = logging.getLogger("platex.clipboard")
 _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE = 0x0002
 
-_MAX_CLIPBOARD_ATTEMPTS = 8
-_CLIPBOARD_RETRY_DELAY_SECONDS = 0.12
+_MAX_CLIPBOARD_ATTEMPTS = 20
+_CLIPBOARD_RETRY_DELAY_SECONDS = 0.08
 
 _user32 = ctypes.windll.user32
 _kernel32 = ctypes.windll.kernel32
@@ -22,12 +22,24 @@ _clipboard_lock = threading.Lock()
 
 @contextmanager
 def _open_clipboard():
-    if not _user32.OpenClipboard(None):
-        raise RuntimeError("Unable to open Windows clipboard")
-    try:
-        yield
-    finally:
-        _user32.CloseClipboard()
+    last_error: Exception | None = None
+    for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+        if _user32.OpenClipboard(None):
+            try:
+                yield
+            finally:
+                _user32.CloseClipboard()
+            return
+
+        last_error = RuntimeError("Unable to open Windows clipboard")
+        logger.debug(
+            "OpenClipboard attempt %s/%s failed",
+            attempt,
+            _MAX_CLIPBOARD_ATTEMPTS,
+        )
+        time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
+
+    raise RuntimeError("Unable to open Windows clipboard after retries") from last_error
 
 
 def _allocate_global_memory(data: bytes) -> int:

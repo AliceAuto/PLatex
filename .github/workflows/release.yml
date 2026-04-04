@@ -2,12 +2,17 @@ name: Release PLatex
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release-windows:
@@ -49,10 +54,14 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: auto-${{ github.run_number }}
+          name: Auto Release ${{ github.run_number }}
+          generate_release_notes: true
           files: |
             dist/platex-client.exe
             dist/platex_client-*.whl
             dist/platex_client-*.tar.gz
             release/PLatexClient-0.1.0-win64.zip
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

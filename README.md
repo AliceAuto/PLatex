@@ -172,14 +172,9 @@ platex-client history --limit 20
 其中：
 
 - `build.yml` 用于自动构建并上传 artifact
-- `release.yml` 会在推送 `v*` tag 时自动构建并创建 GitHub Release
+- `release.yml` 会在推送到 `main` 或 `master` 时自动构建并创建 GitHub Release
 
-例如：
-
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
+也可以手动触发 workflow dispatch 进行发布。
 
 ## 目录结构
 

@@ -3,20 +3,25 @@ from __future__ import annotations
 from hashlib import sha256
 from io import BytesIO
 from typing import Any
+import logging
 import time
 
 from PIL import Image, ImageGrab
 
-from .windows_clipboard import set_text
+from .windows_clipboard import _clipboard_lock, set_text
 from .models import ClipboardImage
+
+
+logger = logging.getLogger("platex.clipboard")
 
 
 def grab_image_clipboard() -> ClipboardImage | None:
     """Grab image from clipboard with retry logic for lock contention."""
-    max_retries = 3
-    for attempt in range(max_retries):
+    max_retries = 8
+    for attempt in range(1, max_retries + 1):
         try:
-            content: Any = ImageGrab.grabclipboard()
+            with _clipboard_lock:
+                content: Any = ImageGrab.grabclipboard()
             if not isinstance(content, Image.Image):
                 return None
 
@@ -24,10 +29,12 @@ def grab_image_clipboard() -> ClipboardImage | None:
             content.save(buffer, format="PNG")
             return ClipboardImage(image_bytes=buffer.getvalue(), width=content.width, height=content.height)
         except OSError as exc:
-            if attempt < max_retries - 1:
-                time.sleep(0.1)  # 等待粘贴板释放
+            if attempt < max_retries:
+                logger.debug("Clipboard read attempt %s/%s failed: %s", attempt, max_retries, exc)
+                time.sleep(0.12 * attempt)
                 continue
-            raise
+            logger.debug("Clipboard read failed after retries: %s", exc)
+            return None
 
 
 def image_hash(image_bytes: bytes) -> str:
