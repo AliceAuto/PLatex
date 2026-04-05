@@ -6,13 +6,17 @@ on:
       tag_prefix:
         description: Tag prefix to clean (empty means all tags)
         required: false
-        default: auto-
+        default: ""
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
 
 jobs:
   cleanup:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[cleanup-now]')
     runs-on: ubuntu-latest
     steps:
       - name: Delete all releases
