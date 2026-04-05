@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import sys
 import time
 from pathlib import Path
@@ -11,6 +12,26 @@ if sys.platform == "win32":
 
 
 _INSTANCE_LOCK_HANDLE = None
+_INSTANCE_PANEL_EVENT_NAME = r"Local\PLatexClient_ShowControlPanel"
+
+if sys.platform == "win32":
+    _kernel32 = ctypes.windll.kernel32
+    _EVENT_MODIFY_STATE = 0x0002
+    _SYNCHRONIZE = 0x00100000
+
+
+def _signal_existing_instance_panel() -> bool:
+    if sys.platform != "win32":
+        return False
+
+    handle = _kernel32.OpenEventW(_EVENT_MODIFY_STATE | _SYNCHRONIZE, False, _INSTANCE_PANEL_EVENT_NAME)
+    if not handle:
+        return False
+
+    try:
+        return bool(_kernel32.SetEvent(handle))
+    finally:
+        _kernel32.CloseHandle(handle)
 
 if __package__ in {None, ""}:
     if getattr(sys, "frozen", False):
@@ -170,8 +191,9 @@ def _serve(args: argparse.Namespace) -> int:
 
 def _tray(args: argparse.Namespace) -> int:
     if not _acquire_single_instance_lock():
-        print("PLatex tray is already running. Please exit the existing tray instance first.")
-        return 1
+        _signal_existing_instance_panel()
+        print("PLatex tray is already running. Activated the existing instance.")
+        return 0
     
     try:
         runtime = _resolve_runtime_config(args)

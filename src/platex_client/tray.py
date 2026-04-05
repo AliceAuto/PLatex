@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import queue
@@ -17,6 +18,15 @@ from .app import PlatexApp
 from .config import default_config_path
 from .history import HistoryStore
 from .models import ClipboardEvent
+
+
+_INSTANCE_PANEL_EVENT_NAME = r"Local\PLatexClient_ShowControlPanel"
+
+if sys.platform == "win32":
+    _kernel32 = ctypes.windll.kernel32
+    _EVENT_MODIFY_STATE = 0x0002
+    _SYNCHRONIZE = 0x00100000
+    _INFINITE = 0xFFFFFFFF
 
 
 def _load_pystray():
@@ -171,6 +181,16 @@ def _open_runtime_terminal(script_path: Path, log_path: str | None) -> None:
     )
 
 
+def _create_instance_panel_event():
+    if sys.platform != "win32":
+        return None
+
+    handle = _kernel32.CreateEventW(None, False, False, _INSTANCE_PANEL_EVENT_NAME)
+    if not handle:
+        return None
+    return handle
+
+
 @dataclass(slots=True)
 class TrayController:
     app: PlatexApp
@@ -197,6 +217,7 @@ class TrayController:
         popup_queue: queue.Queue[tuple[str, str, int] | None] = queue.Queue()
         panel_queue: queue.Queue[str | None] = queue.Queue()
         popup_stop = threading.Event()
+        panel_event_handle = _create_instance_panel_event()
 
         def popup_loop() -> None:
             try:
@@ -515,6 +536,17 @@ class TrayController:
         popup_thread = threading.Thread(target=popup_loop, name="platex-qt-popup-loop", daemon=True)
         popup_thread.start()
 
+        def _panel_signal_loop() -> None:
+            if panel_event_handle is None:
+                return
+            while not popup_stop.is_set():
+                result = _kernel32.WaitForSingleObject(panel_event_handle, 250)
+                if result == 0:
+                    panel_queue.put("open-panel")
+
+        panel_signal_thread = threading.Thread(target=_panel_signal_loop, name="platex-panel-signal-loop", daemon=True)
+        panel_signal_thread.start()
+
         def show_success_popup(title: str, latex: str, timeout_ms: int = 12000) -> None:
             if popup_stop.is_set():
                 return
@@ -579,5 +611,10 @@ class TrayController:
             popup_queue.put(None)
             panel_queue.put(None)
             popup_thread.join(timeout=1.0)
+            if panel_event_handle is not None:
+                try:
+                    _kernel32.CloseHandle(panel_event_handle)
+                except Exception:
+                    pass
             self.app.stop()
         return 0
