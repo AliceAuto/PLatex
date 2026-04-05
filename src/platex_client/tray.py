@@ -220,6 +220,8 @@ class TrayController:
         panel_event_handle = _create_instance_panel_event()
 
         def popup_loop() -> None:
+            os.environ.setdefault("QT_OPENGL", "software")
+            os.environ.setdefault("QT_QUICK_BACKEND", "software")
             try:
                 from PyQt6.QtCore import QTimer, Qt
                 from PyQt6.QtWidgets import (
@@ -533,9 +535,6 @@ class TrayController:
 
             app.exec()
 
-        popup_thread = threading.Thread(target=popup_loop, name="platex-qt-popup-loop", daemon=True)
-        popup_thread.start()
-
         def _panel_signal_loop() -> None:
             if panel_event_handle is None:
                 return
@@ -600,20 +599,36 @@ class TrayController:
         icon = pystray.Icon("PLatexClient", _build_icon_image(), self._limit_title(show_status()), menu)
         self.app.on_ocr_success = notify_success
         self.app.start()
+
+        def _tray_loop() -> None:
+            try:
+                icon.run()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Error in tray loop thread: %s", exc)
+                popup_stop.set()
+                popup_queue.put(None)
+                panel_queue.put(None)
+
+        tray_thread = threading.Thread(target=_tray_loop, name="platex-pystray-loop", daemon=True)
+        tray_thread.start()
+
         try:
-            # In console-launched tray mode, ignore Ctrl+C and exit from tray menu.
-            signal.signal(signal.SIGINT, signal.SIG_IGN)
-            icon.run()
+            # Keep Qt on main thread to avoid Qt6Gui crashes on some Windows setups.
+            popup_loop()
         except KeyboardInterrupt:
             logger.info("Tray interrupted by keyboard")
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error in tray main loop: %s", exc)
         finally:
-            signal.signal(signal.SIGINT, previous_sigint_handler)
             popup_stop.set()
             popup_queue.put(None)
             panel_queue.put(None)
-            popup_thread.join(timeout=1.0)
+            try:
+                icon.stop()
+            except Exception:
+                pass
+            tray_thread.join(timeout=1.0)
+            signal.signal(signal.SIGINT, previous_sigint_handler)
             if panel_event_handle is not None:
                 try:
                     _kernel32.CloseHandle(panel_event_handle)
