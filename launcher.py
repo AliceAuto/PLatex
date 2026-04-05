@@ -18,7 +18,8 @@ def _bootstrap_log_path() -> Path:
 def _append_startup_log(message: str) -> None:
     try:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        _bootstrap_log_path().open("a", encoding="utf-8").write(f"[{ts}] {message}\n")
+        with _bootstrap_log_path().open("a", encoding="utf-8") as handle:
+            handle.write(f"[{ts}] {message}\n")
     except Exception:
         # Startup logging must never block app launch.
         pass
