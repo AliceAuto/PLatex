@@ -551,6 +551,7 @@ class TrayController:
 
         panel_signal_thread = threading.Thread(target=_panel_signal_loop, name="platex-panel-signal-loop", daemon=True)
         panel_signal_thread.start()
+        force_exit_timer: threading.Timer | None = None
 
         def _request_shutdown() -> None:
             if popup_stop.is_set():
@@ -599,10 +600,16 @@ class TrayController:
             icon.title = show_status()
 
         def quit_app(icon, _item) -> None:
+            nonlocal force_exit_timer
             logger.info("Tray exit requested")
             _request_shutdown()
             self.app.stop()
             icon.stop()
+            # Fallback: some Windows tray/Qt combinations may keep the process alive.
+            if force_exit_timer is None:
+                force_exit_timer = threading.Timer(2.5, lambda: os._exit(0))
+                force_exit_timer.daemon = True
+                force_exit_timer.start()
 
         menu = Menu(
             MenuItem("Control Panel", open_control_panel),
@@ -638,6 +645,11 @@ class TrayController:
             except Exception:
                 pass
             tray_thread.join(timeout=1.0)
+            if force_exit_timer is not None:
+                try:
+                    force_exit_timer.cancel()
+                except Exception:
+                    pass
             signal.signal(signal.SIGINT, previous_sigint_handler)
             if panel_event_handle is not None:
                 try:
