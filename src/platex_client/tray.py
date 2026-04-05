@@ -235,7 +235,7 @@ class TrayController:
                     QWidget,
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.debug("PyQt popup unavailable: %s", exc)
+                logger.exception("PyQt popup unavailable: %s", exc)
                 return
 
             app = QApplication([])
