@@ -58,7 +58,7 @@ def _default_script_path() -> Path:
 
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
-        # 1) Beside exe: release/PLatexClient-0.1.0/scripts/glm_vision_ocr.py
+        # 1) Beside exe: release/PLatexClient-0.0.1/scripts/glm_vision_ocr.py
         candidates.append(Path(sys.executable).resolve().parent / script_name)
         # 2) PyInstaller temp extraction dir (when bundled with add-data)
         meipass = getattr(sys, "_MEIPASS", None)
@@ -132,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve", help="Start clipboard monitoring.")
     subparsers.add_parser("tray", help="Start clipboard monitoring in system tray mode.")
+    subparsers.add_parser("panel", help="Open control panel (starts tray if needed).")
 
     history_parser = subparsers.add_parser("history", help="Show recent OCR history.")
     history_parser.add_argument("--limit", type=int, default=10)
@@ -189,7 +190,7 @@ def _serve(args: argparse.Namespace) -> int:
     return 0
 
 
-def _tray(args: argparse.Namespace) -> int:
+def _tray(args: argparse.Namespace, *, open_panel_on_start: bool = False) -> int:
     if not _acquire_single_instance_lock():
         _signal_existing_instance_panel()
         print("PLatex tray is already running. Activated the existing instance.")
@@ -208,7 +209,7 @@ def _tray(args: argparse.Namespace) -> int:
         controller = TrayController(app=app, history=history)
         print(f"Starting tray mode. Mounted script: {runtime['script']}")
         print(f"Logging to: {runtime['log_file']}")
-        return controller.run()
+        return controller.run(open_panel_on_start=open_panel_on_start)
     finally:
         _release_single_instance_lock()
 
@@ -285,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
-        argv = ["tray"]
+        argv = ["panel"]
 
     args = parser.parse_args(argv)
 
@@ -295,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         return _serve(args)
     if args.command == "tray":
         return _tray(args)
+    if args.command == "panel":
+        return _tray(args, open_panel_on_start=True)
     if args.command == "logs":
         return _print_logs(runtime, args.limit)
     if args.command == "once":

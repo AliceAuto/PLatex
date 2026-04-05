@@ -6,7 +6,7 @@ on:
       tag_prefix:
         description: Tag prefix to clean (empty means all tags)
         required: false
-        default: auto-
+        default: ""
 
 permissions:
   contents: write

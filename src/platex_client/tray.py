@@ -203,7 +203,7 @@ class TrayController:
             return text
         return text[: limit - 1] + "…"
 
-    def run(self) -> int:
+    def run(self, *, open_panel_on_start: bool = False) -> int:
         logger = logging.getLogger("platex.tray")
         pystray, Menu, MenuItem = _load_pystray()
         previous_sigint_handler = signal.getsignal(signal.SIGINT)
@@ -546,6 +546,9 @@ class TrayController:
 
         panel_signal_thread = threading.Thread(target=_panel_signal_loop, name="platex-panel-signal-loop", daemon=True)
         panel_signal_thread.start()
+
+        if open_panel_on_start:
+            panel_queue.put("open-panel")
 
         def show_success_popup(title: str, latex: str, timeout_ms: int = 12000) -> None:
             if popup_stop.is_set():

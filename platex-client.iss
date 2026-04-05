@@ -1,5 +1,5 @@
 #define MyAppName "PLatex Client"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.0.1"
 #define MyAppPublisher "AliceAuto"
 #define MyAppExeName "platex-client.exe"
 #define MyAppScriptName "glm_vision_ocr.py"
@@ -13,7 +13,7 @@ DefaultDirName={autopf}\PLatexClient
 DisableDirPage=no
 DisableProgramGroupPage=yes
 OutputDir=dist\installer
-OutputBaseFilename=PLatexClient-0.1.0-win64-setup
+OutputBaseFilename=PLatexClient-0.0.1-win64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
