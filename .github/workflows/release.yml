@@ -58,16 +58,23 @@ jobs:
         shell: pwsh
         run: |
           git fetch --tags origin
-          $tags = git tag -l "auto-*"
-          $max = 0
+          $tags = git tag -l "v*"
+          $versions = @()
           foreach ($tag in $tags) {
-            if ($tag -match '^auto-(\d+)$') {
-              $n = [int]$Matches[1]
-              if ($n -gt $max) { $max = $n }
+            if ($tag -match '^v(\d+\.\d+\.\d+)$') {
+              try {
+                $versions += [version]$Matches[1]
+              } catch {
+              }
             }
           }
-          $next = $max + 1
-          "tag_name=auto-$next" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          if ($versions.Count -eq 0) {
+            $next = [version]'0.0.1'
+          } else {
+            $current = $versions | Sort-Object -Descending | Select-Object -First 1
+            $next = [version]::new($current.Major, $current.Minor, $current.Build + 1)
+          }
+          "tag_name=v$next" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
