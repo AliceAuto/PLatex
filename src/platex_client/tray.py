@@ -15,6 +15,7 @@ from typing import Any
 import yaml
 
 from .app import PlatexApp
+from .clipboard import copy_text_to_clipboard
 from .config import default_config_path
 from .history import HistoryStore
 from .models import ClipboardEvent
@@ -262,11 +263,13 @@ class TrayController:
                             panel_window.activateWindow()
 
             class _Popup(QWidget):
-                def __init__(self, title: str, message: str) -> None:
+                def __init__(self, title: str, message: str, latex: str) -> None:
                     super().__init__(None)
                     self._fade_timer: QTimer | None = None
                     self._fade_step = 0
                     self._fade_total_steps = 24
+                    self._latex = latex
+                    self._copied = False
                     self.setWindowTitle(title)
                     self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
                     self.setWindowFlag(Qt.WindowType.Tool, True)
@@ -292,6 +295,9 @@ class TrayController:
                     layout.addWidget(body_label)
 
                 def mousePressEvent(self, event):  # noqa: N802
+                    if not self._copied:
+                        copy_text_to_clipboard(self._latex)
+                        self._copied = True
                     self.close()
                     event.accept()
 
@@ -503,9 +509,9 @@ class TrayController:
                     preview = latex.replace("\n", " ").strip()
                     if len(preview) > 220:
                         preview = preview[:217] + "..."
-                    message = f"{preview or 'OCR completed'}\n\n结果已写入剪贴板，直接粘贴即可。"
+                    message = f"{preview or 'OCR completed'}\n\n点击此弹窗后写入剪贴板。"
 
-                    popup = _Popup(title, message)
+                    popup = _Popup(title, message, latex)
                     screen = app.primaryScreen()
                     if screen is not None:
                         available = screen.availableGeometry()

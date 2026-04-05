@@ -3,24 +3,8 @@ from __future__ import annotations
 import base64
 import json
 import os
-import logging
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
-
-logger = logging.getLogger("platex.script.glm")
-
-
-def _copy_text_to_clipboard(text: str) -> None:
-    # Prefer the client's hardened Windows clipboard path when available.
-    try:
-        from platex_client.windows_clipboard import set_text  # type: ignore
-
-        set_text(text)
-        return
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Clipboard write failed: %s", exc)
-        raise
 
 
 def _extract_latex(content: object) -> str:
@@ -97,8 +81,4 @@ def process_image(image_bytes: bytes, context: dict[str, object] | None = None) 
     if not latex:
         raise RuntimeError(f"GLM returned no usable OCR result: {json.dumps(data, ensure_ascii=False)}")
 
-    try:
-        _copy_text_to_clipboard(latex)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("OCR result was not copied to clipboard: %s", exc)
     return latex
