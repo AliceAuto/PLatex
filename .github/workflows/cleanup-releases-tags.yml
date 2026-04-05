@@ -1,6 +1,9 @@
 name: Cleanup Releases And Tags
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       tag_prefix:
@@ -13,6 +16,7 @@ permissions:
 
 jobs:
   cleanup:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[cleanup-now]')
     runs-on: ubuntu-latest
     steps:
       - name: Delete all releases

@@ -58,7 +58,7 @@ def _default_script_path() -> Path:
 
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
-        # 1) Beside exe: release/PLatexClient-0.0.1/scripts/glm_vision_ocr.py
+        # 1) Beside exe: release/PLatexClient-1.0.0/scripts/glm_vision_ocr.py
         candidates.append(Path(sys.executable).resolve().parent / script_name)
         # 2) PyInstaller temp extraction dir (when bundled with add-data)
         meipass = getattr(sys, "_MEIPASS", None)
