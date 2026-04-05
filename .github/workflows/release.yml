@@ -40,7 +40,7 @@ jobs:
 
       - name: Build executable
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --noconsole --contents-directory . --name platex-client --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --collect-submodules PyQt6 --collect-data PyQt6 --collect-binaries PyQt6 launcher.py
+          python -m PyInstaller --noconfirm --clean --onedir --noconsole --contents-directory . --name platex-client --icon assets/platex-client.ico --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --collect-submodules PyQt6 --collect-data PyQt6 --collect-binaries PyQt6 launcher.py
 
       - name: Verify bundled runtime files
         run: |
