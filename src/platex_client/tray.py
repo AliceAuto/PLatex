@@ -552,6 +552,13 @@ class TrayController:
         panel_signal_thread = threading.Thread(target=_panel_signal_loop, name="platex-panel-signal-loop", daemon=True)
         panel_signal_thread.start()
 
+        def _request_shutdown() -> None:
+            if popup_stop.is_set():
+                return
+            popup_stop.set()
+            popup_queue.put(None)
+            panel_queue.put(None)
+
         if open_panel_on_start:
             panel_queue.put("open-panel")
 
@@ -593,6 +600,7 @@ class TrayController:
 
         def quit_app(icon, _item) -> None:
             logger.info("Tray exit requested")
+            _request_shutdown()
             self.app.stop()
             icon.stop()
 
@@ -611,9 +619,7 @@ class TrayController:
                 icon.run()
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Error in tray loop thread: %s", exc)
-                popup_stop.set()
-                popup_queue.put(None)
-                panel_queue.put(None)
+                _request_shutdown()
 
         tray_thread = threading.Thread(target=_tray_loop, name="platex-pystray-loop", daemon=True)
         tray_thread.start()
@@ -626,9 +632,7 @@ class TrayController:
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error in tray main loop: %s", exc)
         finally:
-            popup_stop.set()
-            popup_queue.put(None)
-            panel_queue.put(None)
+            _request_shutdown()
             try:
                 icon.stop()
             except Exception:
