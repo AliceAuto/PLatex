@@ -10,3 +10,5 @@
 ## 配置文件
 
 配置文件在 `%APPDATA%\PLatexClient\config.yaml`。
+
+---
