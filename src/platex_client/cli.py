@@ -60,10 +60,13 @@ def _default_script_path() -> Path:
 
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent / script_name)
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / script_name)
+        candidates.append(exe_dir / "_internal" / script_name)
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             candidates.append(Path(meipass) / script_name)
+            candidates.append(Path(meipass) / "_internal" / script_name)
 
     candidates.append(Path(__file__).resolve().parents[2] / script_name)
 

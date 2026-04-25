@@ -428,6 +428,7 @@ class TrayController:
                         try:
                             widget = script.create_settings_widget(self._tab_widget)
                         except Exception:
+                            logger.exception("Failed to create settings widget for script %s", script.name)
                             widget = None
 
                         if widget is not None:

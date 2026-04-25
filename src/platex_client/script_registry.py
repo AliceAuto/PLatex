@@ -171,15 +171,17 @@ class ScriptRegistry:
 
 def default_scripts_dir() -> Path:
     """Return the default scripts directory."""
-    from platformdirs import user_data_dir
     import sys
 
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
-        candidates.append(Path(sys.executable).resolve().parent / "scripts")
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "scripts")
+        candidates.append(exe_dir / "_internal" / "scripts")
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             candidates.append(Path(meipass) / "scripts")
+            candidates.append(Path(meipass) / "_internal" / "scripts")
 
     candidates.append(Path(__file__).resolve().parents[2] / "scripts")
 
@@ -187,4 +189,5 @@ def default_scripts_dir() -> Path:
         if candidate.is_dir():
             return candidate
 
-    return candidates[-1]
+    logger.warning("Scripts directory not found in any candidate path. Tried: %s", candidates)
+    return candidates[0]
