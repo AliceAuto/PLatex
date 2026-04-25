@@ -3,3 +3,18 @@ glm_model: glm-4.1v-thinking-flash
 glm_base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
 isolate_mode: false
 interval: 0.8
+auto_start: true
+ui_language: en
+scripts:
+  glm_vision_ocr:
+    model: glm-4.1v-thinking-flash
+    base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
+    enabled: true
+  hotkey_click:
+    entries:
+    - hotkey: Ctrl+Shift+E
+      x: 552
+      y: 939
+      button: left
+      remark: r
+    enabled: true

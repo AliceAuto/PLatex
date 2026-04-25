@@ -67,6 +67,10 @@ def convert_hotkey_str(hotkey: str) -> str:
         "caps_lock": "<caps_lock>",
     }
 
+    # Some UI components may emit multi-sequence text like
+    # "Ctrl+Shift+E, Ctrl+Shift+E". Keep only the first sequence.
+    hotkey = hotkey.split(",", 1)[0].strip()
+
     parts = hotkey.split("+")
     if not parts:
         raise ValueError(f"Invalid hotkey string: {hotkey!r}")
@@ -164,51 +168,119 @@ def _win32_simulate_click(x: int, y: int, button: str = "left") -> bool:
             pass
 
 
-class HotkeyListener:
-    """Global hotkey listener using pynput.
+class _PynputBackend:
+    """pynput-based hotkey backend."""
 
-    Registers key combinations and dispatches callbacks when triggered.
-    Supports dynamic registration and unregistration.
+    def __init__(self, suspended: threading.Event) -> None:
+        self._bindings: dict[str, Callable[[], None]] = {}
+        self._listener: object | None = None
+        self._suspended = suspended
+
+    def set_bindings(self, bindings: dict[str, Callable[[], None]]) -> None:
+        self._bindings = dict(bindings)
+
+    def start(self) -> bool:
+        if not _PYNPUT_AVAILABLE:
+            return False
+        self.stop()
+        if not self._bindings:
+            return True
+
+        wrapped_bindings: dict[str, Callable[[], None]] = {}
+        for pynput_key, cb in self._bindings.items():
+            def _make_callback(callback: Callable[[], None]) -> Callable[[], None]:
+                def _wrapped() -> None:
+                    if not self._suspended.is_set():
+                        return
+                    try:
+                        callback()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Error in hotkey callback")
+                return _wrapped
+            wrapped_bindings[pynput_key] = _make_callback(cb)
+
+        try:
+            self._listener = _pynput_keyboard.GlobalHotKeys(wrapped_bindings)
+            self._listener.start()
+            logger.info("pynput hotkey listener started with %d bindings", len(wrapped_bindings))
+            return True
+        except Exception as exc:
+            logger.error("Failed to start pynput hotkey listener: %s", exc)
+            self._listener = None
+            return False
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            try:
+                self._listener.stop()
+            except Exception as exc:
+                logger.debug("Failed to stop pynput listener cleanly: %s", exc)
+            self._listener = None
+
+
+class HotkeyListener:
+    """Global hotkey listener with dual backend support.
+
+    On Windows, uses Win32 RegisterHotKey API for better reliability.
+    Falls back to pynput on other platforms or when Win32 fails.
     """
 
     def __init__(self) -> None:
         self._bindings: dict[str, Callable[[], None]] = {}
-        self._action_map: dict[str, str] = {}
-        self._listener: object | None = None
         self._lock = threading.Lock()
         self._running = False
         self._suspended = threading.Event()
         self._suspended.set()
+        self._win32_backend: Any | None = None
+        self._pynput_backend: _PynputBackend | None = None
+        self._use_win32 = False
+        self._failed_bindings: dict[str, int] = {}
+        self._retry_timer: threading.Timer | None = None
+        self._status_callbacks: list[Callable[[dict], None]] = []
 
-    def register(self, hotkey: str, callback: Callable[[], None]) -> None:
+        if _IS_WINDOWS:
+            try:
+                from .win32_hotkey import Win32HotkeyListener
+                self._win32_backend = Win32HotkeyListener()
+            except Exception as exc:
+                logger.debug("Win32 hotkey backend not available: %s", exc)
+
+        if _PYNPUT_AVAILABLE:
+            self._pynput_backend = _PynputBackend(self._suspended)
+
+    def register(self, hotkey: str, callback: Callable[[], None]) -> bool:
         """Register a global hotkey with a callback.
 
         hotkey uses human-friendly format: "Ctrl+Alt+1".
+        Returns True if registration succeeded.
         """
         with self._lock:
-            pynput_key = convert_hotkey_str(hotkey)
-            self._bindings[pynput_key] = callback
-            self._rebuild_listener()
+            self._bindings[hotkey] = callback
+            self._failed_bindings.pop(hotkey, None)
+            success = self._rebuild_listener()
+            return success
 
     def unregister(self, hotkey: str) -> None:
         """Unregister a global hotkey."""
         with self._lock:
-            pynput_key = convert_hotkey_str(hotkey)
-            self._bindings.pop(pynput_key, None)
+            self._bindings.pop(hotkey, None)
+            self._failed_bindings.pop(hotkey, None)
             self._rebuild_listener()
 
     def clear(self) -> None:
         """Remove all hotkey bindings."""
         with self._lock:
             self._bindings.clear()
-            self._action_map.clear()
-            self._rebuild_listener()
+            self._failed_bindings.clear()
+            self._cancel_retry()
+            if self._win32_backend is not None:
+                self._win32_backend.clear()
+            if self._pynput_backend is not None:
+                self._pynput_backend.set_bindings({})
+                self._pynput_backend.stop()
 
     def start(self) -> None:
         """Start the global hotkey listener."""
-        if not _PYNPUT_AVAILABLE:
-            logger.warning("pynput not available; global hotkeys disabled")
-            return
         self._running = True
         with self._lock:
             self._rebuild_listener()
@@ -216,8 +288,12 @@ class HotkeyListener:
     def stop(self) -> None:
         """Stop the global hotkey listener."""
         self._running = False
+        self._cancel_retry()
         with self._lock:
-            self._stop_listener()
+            if self._win32_backend is not None:
+                self._win32_backend.stop()
+            if self._pynput_backend is not None:
+                self._pynput_backend.stop()
 
     def suspend(self) -> None:
         """Temporarily suspend hotkey processing (e.g., during position picking)."""
@@ -227,44 +303,117 @@ class HotkeyListener:
         """Resume hotkey processing after suspend."""
         self._suspended.set()
 
-    def _rebuild_listener(self) -> None:
-        """Stop the current listener and create a new one with current bindings."""
-        self._stop_listener()
+    def get_status(self) -> dict:
+        """Return current hotkey registration status."""
+        with self._lock:
+            status = {
+                "running": self._running,
+                "suspended": not self._suspended.is_set(),
+                "backend": "win32" if self._use_win32 else ("pynput" if self._pynput_backend else "none"),
+                "registered_count": len(self._bindings),
+                "failed": dict(self._failed_bindings),
+                "bindings": list(self._bindings.keys()),
+            }
+            if self._win32_backend is not None:
+                try:
+                    win32_status = self._win32_backend.get_status()
+                    status["win32"] = win32_status
+                except Exception:
+                    pass
+            return status
 
-        if not _PYNPUT_AVAILABLE or not self._bindings or not self._running:
+    def on_status_change(self, callback: Callable[[dict], None]) -> None:
+        """Register a callback to be called when hotkey status changes."""
+        self._status_callbacks.append(callback)
+
+    def _notify_status(self) -> None:
+        status = self.get_status()
+        for cb in self._status_callbacks:
+            try:
+                cb(status)
+            except Exception:
+                logger.exception("Error in status callback")
+
+    def _rebuild_listener(self) -> bool:
+        """Rebuild the listener with current bindings. Returns True if all bindings registered."""
+        if not self._running:
+            return True
+
+        # Try Win32 backend first on Windows
+        if self._win32_backend is not None and _IS_WINDOWS:
+            self._use_win32 = True
+            self._win32_backend.clear()
+            all_success = True
+            for hotkey, callback in self._bindings.items():
+                # Convert to pynput format first, then win32 will parse it
+                try:
+                    pynput_key = convert_hotkey_str(hotkey)
+                except ValueError:
+                    pynput_key = hotkey
+                success = self._win32_backend.register(pynput_key, callback)
+                if not success:
+                    self._failed_bindings[hotkey] = self._failed_bindings.get(hotkey, 0) + 1
+                    all_success = False
+                    logger.warning("Failed to register Win32 hotkey: %s", hotkey)
+
+            self._win32_backend.start()
+            self._notify_status()
+
+            if all_success:
+                # Stop pynput if it was running
+                if self._pynput_backend is not None:
+                    self._pynput_backend.stop()
+                return True
+            else:
+                # Some failed - also start pynput as fallback for those?
+                # Actually pynput will likely fail too for the same reason.
+                # Just report the failures.
+                self._schedule_retry()
+                return False
+
+        # Fall back to pynput
+        if self._pynput_backend is not None:
+            self._use_win32 = False
+            pynput_bindings: dict[str, Callable[[], None]] = {}
+            for hotkey, callback in self._bindings.items():
+                try:
+                    pynput_key = convert_hotkey_str(hotkey)
+                    pynput_bindings[pynput_key] = callback
+                except ValueError as exc:
+                    logger.error("Invalid hotkey '%s': %s", hotkey, exc)
+                    self._failed_bindings[hotkey] = self._failed_bindings.get(hotkey, 0) + 1
+
+            self._pynput_backend.set_bindings(pynput_bindings)
+            success = self._pynput_backend.start()
+            self._notify_status()
+            return success
+
+        logger.warning("No hotkey backend available")
+        self._notify_status()
+        return False
+
+    def _schedule_retry(self) -> None:
+        """Schedule a retry for failed hotkeys."""
+        self._cancel_retry()
+        if not self._failed_bindings or not self._running:
             return
 
-        wrapped_bindings: dict[str, Callable[[], None]] = {}
-        for pynput_key, cb in self._bindings.items():
+        def _retry() -> None:
+            with self._lock:
+                if not self._running:
+                    return
+                # Rebuild will attempt to re-register all bindings including failed ones
+                self._rebuild_listener()
 
-            def _make_callback(callback: Callable[[], None]) -> Callable[[], None]:
-                def _wrapped() -> None:
-                    if not self._suspended.is_set():
-                        return
-                    try:
-                        callback()
-                    except Exception:  # noqa: BLE001
-                        logger.exception("Error in hotkey callback")
+        self._retry_timer = threading.Timer(3.0, _retry)
+        self._retry_timer.daemon = True
+        self._retry_timer.start()
+        logger.debug("Scheduled hotkey retry in 3s for: %s", list(self._failed_bindings.keys()))
 
-                return _wrapped
-
-            wrapped_bindings[pynput_key] = _make_callback(cb)
-
-        try:
-            self._listener = _pynput_keyboard.GlobalHotKeys(wrapped_bindings)
-            self._listener.start()
-            logger.info("Hotkey listener started with %d bindings", len(wrapped_bindings))
-        except Exception as exc:
-            logger.error("Failed to start hotkey listener: %s", exc)
-            self._listener = None
-
-    def _stop_listener(self) -> None:
-        if self._listener is not None:
-            try:
-                self._listener.stop()
-            except Exception as exc:
-                logger.debug("Failed to stop listener cleanly: %s", exc)
-            self._listener = None
+    def _cancel_retry(self) -> None:
+        if self._retry_timer is not None:
+            self._retry_timer.cancel()
+            self._retry_timer = None
 
 
 def simulate_click(x: int, y: int, button: str = "left") -> None:

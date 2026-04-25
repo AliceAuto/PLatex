@@ -20,6 +20,34 @@ if sys.platform == "win32":
     _SYNCHRONIZE = 0x00100000
 
 
+def _enable_windows_dpi_awareness() -> None:
+    if sys.platform != "win32":
+        return
+
+    try:
+        user32 = ctypes.windll.user32
+        shcore = ctypes.windll.shcore
+        try:
+            # Prefer per-monitor DPI awareness v2 when available.
+            user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            return
+        except Exception:
+            pass
+
+        try:
+            shcore.SetProcessDpiAwareness(2)
+            return
+        except Exception:
+            pass
+
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _signal_existing_instance_panel() -> bool:
     if sys.platform != "win32":
         return False
@@ -46,11 +74,9 @@ if __package__ in {None, ""}:
 from .app import PlatexApp
 from .clipboard import copy_text_to_clipboard
 from .config import default_config_path, default_log_path, load_config
-from .config_manager import db_file_path, log_file_path
 from .history import HistoryStore
 from .loader import load_script_processor
 from .logging_utils import setup_logging
-from .script_registry import default_scripts_dir
 from .tray import TrayController
 from .watcher import ClipboardWatcher
 
@@ -60,20 +86,21 @@ def _default_script_path() -> Path:
 
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / script_name)
-        candidates.append(exe_dir / "_internal" / script_name)
+        # 1) Beside exe: release/PLatexClient-1.0.0/scripts/glm_vision_ocr.py
+        candidates.append(Path(sys.executable).resolve().parent / script_name)
+        # 2) PyInstaller temp extraction dir (when bundled with add-data)
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             candidates.append(Path(meipass) / script_name)
-            candidates.append(Path(meipass) / "_internal" / script_name)
 
+    # 3) Source tree fallback for dev mode
     candidates.append(Path(__file__).resolve().parents[2] / script_name)
 
     for candidate in candidates:
         if candidate.exists():
             return candidate
 
+    # Keep deterministic error path if nothing exists
     return candidates[0]
 
 
@@ -87,7 +114,6 @@ def _acquire_single_instance_lock() -> bool:
     lock_file = lock_dir / "platex-client.lock"
 
     handle = open(lock_file, "a+b")
-    handle.seek(0)
     try:
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
@@ -108,7 +134,6 @@ def _release_single_instance_lock() -> None:
     try:
         if sys.platform == "win32":
             try:
-                handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
             except OSError:
                 pass
@@ -134,7 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("serve", help="Start clipboard monitoring.")
-    subparsers.add_parser("tray", help="Start clipboard monitoring in system tray mode.")
+    tray_parser = subparsers.add_parser("tray", help="Start clipboard monitoring in system tray mode.")
+    tray_parser.add_argument("--gui", action="store_true", help="Open control panel on startup.")
     subparsers.add_parser("panel", help="Open control panel (starts tray if needed).")
 
     history_parser = subparsers.add_parser("history", help="Show recent OCR history.")
@@ -170,6 +196,7 @@ def _print_event(prefix: str, event) -> None:
 
 
 def _serve(args: argparse.Namespace) -> int:
+    _enable_windows_dpi_awareness()
     runtime = _resolve_runtime_config(args)
     setup_logging(runtime["log_file"])
     history = HistoryStore(runtime["db_path"])
@@ -194,11 +221,12 @@ def _serve(args: argparse.Namespace) -> int:
 
 
 def _tray(args: argparse.Namespace, *, open_panel_on_start: bool = False) -> int:
+    _enable_windows_dpi_awareness()
     if not _acquire_single_instance_lock():
         _signal_existing_instance_panel()
         print("PLatex tray is already running. Activated the existing instance.")
         return 0
-
+    
     try:
         runtime = _resolve_runtime_config(args)
         setup_logging(runtime["log_file"])
@@ -289,7 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
     if not argv:
-        argv = ["panel"]
+        argv = ["tray", "--gui"]
 
     args = parser.parse_args(argv)
 
@@ -298,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "serve":
         return _serve(args)
     if args.command == "tray":
-        return _tray(args)
+        return _tray(args, open_panel_on_start=getattr(args, "gui", False))
     if args.command == "panel":
         return _tray(args, open_panel_on_start=True)
     if args.command == "logs":

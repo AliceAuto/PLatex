@@ -45,9 +45,10 @@ def _candidate_config_paths(config_path: Path | None) -> list[Path]:
 
     cwd = Path.cwd()
     return [
+        # Global per-user config is the single source of truth.
+        config_file_path(),
         cwd / "config.yaml",
         cwd / "config.example.yaml",
-        config_file_path(),
     ]
 
 

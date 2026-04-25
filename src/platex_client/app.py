@@ -114,8 +114,11 @@ class PlatexApp:
                             log.exception("Error in hotkey callback for %s", a)
                     return _cb
 
-                self.hotkey_listener.register(hotkey, _make_cb(script_ref, action, self.logger))
-                self.logger.info("Registered hotkey: %s -> %s.%s", hotkey, entry.script.name, action)
+                success = self.hotkey_listener.register(hotkey, _make_cb(script_ref, action, self.logger))
+                if success:
+                    self.logger.info("Registered hotkey: %s -> %s.%s", hotkey, entry.script.name, action)
+                else:
+                    self.logger.warning("Failed to register hotkey: %s -> %s.%s (may be in use by another application)", hotkey, entry.script.name, action)
 
         try:
             self.hotkey_listener.start()

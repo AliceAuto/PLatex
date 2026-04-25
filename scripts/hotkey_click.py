@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from platex_client.script_base import ScriptBase
@@ -34,11 +35,19 @@ class HotkeyClickScript(ScriptBase):
     def get_hotkey_bindings(self) -> dict[str, str]:
         result: dict[str, str] = {}
         for i, entry in enumerate(self._entries):
-            hotkey = entry.get("hotkey", "")
+            hotkey = self._normalize_hotkey_string(entry.get("hotkey", ""))
             if hotkey:
                 result[hotkey] = f"click_{i}"
         return result
 
+    @staticmethod
+    def _normalize_hotkey_string(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        # QKeySequenceEdit may emit multi-sequence text like
+        # "Ctrl+Shift+E, Ctrl+Shift+E"; keep only the first one.
+        normalized = value.split(",", 1)[0].strip()
+        return normalized
     def on_hotkey(self, action: str) -> None:
         if not action.startswith("click_"):
             return
@@ -70,7 +79,7 @@ class HotkeyClickScript(ScriptBase):
 
     def create_settings_widget(self, parent=None):
         try:
-            from PyQt6.QtCore import Qt, pyqtSignal
+            from PyQt6.QtCore import Qt, QTimer, pyqtSignal
             from PyQt6.QtWidgets import (
                 QWidget,
                 QVBoxLayout,
@@ -90,6 +99,8 @@ class HotkeyClickScript(ScriptBase):
             return None
 
         script_ref = self
+        settings_changed_callback: Callable[[], None] | None = None
+        settings_widget: _SettingsWidget | None = None
 
         class _PositionPickerOverlay(QWidget):
             position_picked = pyqtSignal(int, int)
@@ -142,8 +153,28 @@ class HotkeyClickScript(ScriptBase):
                 painter.end()
 
             def mousePressEvent(self, event) -> None:  # noqa: N802
-                pos = event.globalPosition()
-                self.position_picked.emit(int(pos.x()), int(pos.y()))
+                # Use Win32 cursor coordinates when available so picked and click
+                # coordinates share the same system across DPI/multi-monitor setups.
+                picked_x: int | None = None
+                picked_y: int | None = None
+                try:
+                    import ctypes
+
+                    class _POINT(ctypes.Structure):
+                        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+                    pt = _POINT()
+                    if ctypes.windll.user32.GetCursorPos(ctypes.byref(pt)):
+                        picked_x, picked_y = int(pt.x), int(pt.y)
+                except Exception:
+                    picked_x = None
+                    picked_y = None
+
+                if picked_x is None or picked_y is None:
+                    pos = event.globalPosition()
+                    picked_x, picked_y = int(pos.x()), int(pos.y())
+
+                self.position_picked.emit(picked_x, picked_y)
                 self.close()
 
             def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -209,7 +240,7 @@ class HotkeyClickScript(ScriptBase):
 
                 row2.addWidget(QLabel("X:"))
                 self._x_spin = QSpinBox()
-                self._x_spin.setRange(0, 9999)
+                self._x_spin.setRange(-32768, 32767)
                 self._x_spin.setMinimumWidth(80)
                 self._x_spin.setValue(int(entry.get("x", 0)))
                 self._x_spin.valueChanged.connect(self._on_value_changed)
@@ -217,7 +248,7 @@ class HotkeyClickScript(ScriptBase):
 
                 row2.addWidget(QLabel("Y:"))
                 self._y_spin = QSpinBox()
-                self._y_spin.setRange(0, 9999)
+                self._y_spin.setRange(-32768, 32767)
                 self._y_spin.setMinimumWidth(80)
                 self._y_spin.setValue(int(entry.get("y", 0)))
                 self._y_spin.valueChanged.connect(self._on_value_changed)
@@ -259,14 +290,27 @@ class HotkeyClickScript(ScriptBase):
 
                 self._overlay: _PositionPickerOverlay | None = None
 
+            def to_entry(self) -> dict[str, Any]:
+                return {
+                    "hotkey": self._hotkey_edit.keySequence().toString(),
+                    "x": self._x_spin.value(),
+                    "y": self._y_spin.value(),
+                    "button": self._button_combo.currentData(),
+                    "remark": self._remark_edit.text(),
+                }
+
             def _on_hotkey_changed(self, seq: QKeySequence) -> None:
-                self.entry["hotkey"] = seq.toString()
+                self.entry["hotkey"] = script_ref._normalize_hotkey_string(seq.toString())
+                if settings_widget is not None:
+                    settings_widget._emit_settings_changed()
 
             def _on_value_changed(self) -> None:
                 self.entry["x"] = self._x_spin.value()
                 self.entry["y"] = self._y_spin.value()
                 self.entry["button"] = self._button_combo.currentData()
                 self.entry["remark"] = self._remark_edit.text()
+                if settings_widget is not None:
+                    settings_widget._emit_settings_changed()
 
             def _pick_position(self) -> None:
                 self._overlay = _PositionPickerOverlay()
@@ -278,11 +322,19 @@ class HotkeyClickScript(ScriptBase):
                 self._y_spin.setValue(y)
                 self.entry["x"] = x
                 self.entry["y"] = y
+                if settings_widget is not None:
+                    settings_widget._emit_settings_changed()
 
         class _SettingsWidget(QWidget):
             def __init__(self, inner_parent: QWidget | None = None) -> None:
                 super().__init__(inner_parent)
                 self._entries: list[_HotkeyEntryWidget] = []
+                self._settings_changed_callback: Callable[[], None] | None = None
+                self._syncing = False
+                self._pending_timer = QTimer(self)
+                self._pending_timer.setSingleShot(True)
+                self._pending_timer.setInterval(300)
+                self._pending_timer.timeout.connect(self._emit_settings_changed)
 
                 main_layout = QVBoxLayout(self)
                 main_layout.setContentsMargins(12, 12, 12, 12)
@@ -314,9 +366,35 @@ class HotkeyClickScript(ScriptBase):
                 for entry_data in script_ref._entries:
                     self._add_entry_with_data(entry_data)
 
+            def load_settings(self) -> None:
+                # Rebuild widgets from script runtime state so YAML/UI stay in sync.
+                self._syncing = True
+                try:
+                    for widget in list(self._entries):
+                        self._remove_entry(widget, notify=False)
+                    for entry_data in script_ref._entries:
+                        self._add_entry_with_data(entry_data)
+                finally:
+                    self._syncing = False
+
+            def set_settings_changed_callback(self, callback: Callable[[], None] | None) -> None:
+                self._settings_changed_callback = callback
+
+            def _schedule_settings_changed(self) -> None:
+                if self._syncing:
+                    return
+
+            def _emit_settings_changed(self) -> None:
+                if self._syncing:
+                    return
+                script_ref.set_entries([w.to_entry() for w in self._entries])
+                if self._settings_changed_callback is not None:
+                    self._settings_changed_callback()
+
             def _add_entry(self) -> None:
                 default_entry = {"hotkey": "", "x": 0, "y": 0, "button": "left", "remark": ""}
                 self._add_entry_with_data(default_entry)
+                self._schedule_settings_changed()
 
             def _add_entry_with_data(self, entry_data: dict[str, Any]) -> None:
                 entry_widget = _HotkeyEntryWidget(entry_data)
@@ -324,18 +402,21 @@ class HotkeyClickScript(ScriptBase):
                 self._entries.append(entry_widget)
                 self._scroll_layout.addWidget(entry_widget)
 
-            def _remove_entry(self, widget: _HotkeyEntryWidget) -> None:
+            def _remove_entry(self, widget: _HotkeyEntryWidget, notify: bool = True) -> None:
                 if widget in self._entries:
                     self._entries.remove(widget)
                 self._scroll_layout.removeWidget(widget)
                 widget.setParent(None)
                 widget.deleteLater()
+                if notify:
+                    self._schedule_settings_changed()
 
             def save_settings(self) -> None:
-                entries = [w.entry for w in self._entries]
+                entries = [w.to_entry() for w in self._entries]
                 script_ref.set_entries(entries)
 
-        return _SettingsWidget(parent)
+        settings_widget = _SettingsWidget(parent)
+        return settings_widget
 
 
 def create_script() -> ScriptBase:
