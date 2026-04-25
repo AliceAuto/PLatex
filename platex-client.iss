@@ -22,7 +22,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=assets\platex-client.ico
 
 [Registry]
-Root: HKCU; Subkey: "Software\PLatexClient"; Flags: dontdeletekey
+Root: HKCU; Subkey: "Software\PLatexClient"; ValueType: none; Flags: uninsdeletekeyifempty
 
 [UninstallDelete]
 ; Never delete config/data directories or registry during uninstall

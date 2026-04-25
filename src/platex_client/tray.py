@@ -412,11 +412,23 @@ class TrayController:
                     io_row.addStretch()
                     layout.addLayout(io_row)
 
-                    layout.addWidget(QLabel("配置文件（完整 YAML，可滚动编辑）"))
+                    self._yaml_toggle_btn = QPushButton("▶ 显示配置文件 (YAML)")
+                    self._yaml_toggle_btn.setStyleSheet("QPushButton { font-size: 12px; color: #555; border: none; text-align: left; padding: 4px 0; }")
+                    self._yaml_toggle_btn.setCheckable(True)
+                    layout.addWidget(self._yaml_toggle_btn)
+
+                    self._yaml_container = QWidget()
+                    yaml_container_layout = QVBoxLayout(self._yaml_container)
+                    yaml_container_layout.setContentsMargins(0, 0, 0, 0)
                     self.yaml_editor = QPlainTextEdit()
                     self.yaml_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-                    self.yaml_editor.setPlainText(self._load_yaml_text())
-                    layout.addWidget(self.yaml_editor)
+                    self._yaml_text = self._load_yaml_text()
+                    self.yaml_editor.setPlainText(self._hide_api_key(self._yaml_text))
+                    yaml_container_layout.addWidget(self.yaml_editor)
+                    self._yaml_container.setVisible(False)
+                    layout.addWidget(self._yaml_container)
+
+                    self._yaml_toggle_btn.toggled.connect(self._toggle_yaml_editor)
 
                     self._sync_ui_from_yaml()
                     return tab
@@ -558,6 +570,64 @@ class TrayController:
 
                     QMessageBox.information(self, "导入成功", "配置已导入。请检查后点击「保存并应用」。")
 
+                def _toggle_yaml_editor(self, checked: bool) -> None:
+                    if checked:
+                        self._yaml_toggle_btn.setText("▼ 隐藏配置文件 (YAML)")
+                        self._yaml_container.setVisible(True)
+                    else:
+                        self._yaml_toggle_btn.setText("▶ 显示配置文件 (YAML)")
+                        self._yaml_container.setVisible(False)
+
+                @staticmethod
+                def _hide_api_key(yaml_text: str) -> str:
+                    """Replace api_key values with placeholder in YAML preview."""
+                    import re
+                    return re.sub(r'^(api_key\s*:\s*).*$', r'\1***', yaml_text, flags=re.MULTILINE)
+
+                @staticmethod
+                def _restore_api_key(edited_text: str, original_text: str) -> str:
+                    """Restore api_key from original if user didn't change it (left *** placeholder)."""
+                    import re
+                    edited_lines = edited_text.splitlines()
+                    original_lines = original_text.splitlines()
+                    result_lines: list[str] = []
+                    orig_key = None
+                    for line in original_lines:
+                        m = re.match(r'^api_key\s*:\s*(.+)$', line)
+                        if m:
+                            orig_key = m.group(1).strip()
+
+                    for line in edited_lines:
+                        m = re.match(r'^(api_key\s*:\s*)(\*{3,}|.+)$', line)
+                        if m:
+                            prefix = m.group(1)
+                            val = m.group(2).strip()
+                            if val.startswith("*") and orig_key:
+                                result_lines.append(prefix + orig_key)
+                            else:
+                                result_lines.append(line)
+                        else:
+                            result_lines.append(line)
+                    return "\n".join(result_lines)
+
+                @staticmethod
+                def _strip_api_keys(data: dict[str, Any]) -> dict[str, Any]:
+                    """Recursively strip api_key values from payload for disk storage."""
+                    import copy
+                    result = copy.deepcopy(data)
+                    def _strip(obj: Any) -> None:
+                        if isinstance(obj, dict):
+                            for k, v in list(obj.items()):
+                                if k == "api_key" and isinstance(v, str) and v:
+                                    obj[k] = v[:4] + "*" * max(0, len(v) - 4) if len(v) > 4 else "****"
+                                else:
+                                    _strip(v)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                _strip(item)
+                    _strip(result)
+                    return result
+
                 def _sync_ui_from_yaml(self) -> None:
                     payload: dict[str, Any] = {}
                     try:
@@ -577,7 +647,9 @@ class TrayController:
                 def _load_yaml_text(self) -> str:
                     cfg_path = _panel_config_path()
                     if cfg_path.exists():
-                        return cfg_path.read_text(encoding="utf-8")
+                        text = cfg_path.read_text(encoding="utf-8")
+                        self._yaml_text = text
+                        return text
 
                     seed = dict(private_cfg)
                     seed["script"] = str(controller.app.script_path)
@@ -585,16 +657,46 @@ class TrayController:
                     script_configs = controller.app.registry.save_configs()
                     if script_configs:
                         seed["scripts"] = script_configs
-                    return yaml.safe_dump(seed, sort_keys=False, allow_unicode=True)
+                    self._yaml_text = yaml.safe_dump(seed, sort_keys=False, allow_unicode=True)
+                    return self._yaml_text
 
                 def _parse_yaml(self) -> dict[str, Any]:
                     raw = self.yaml_editor.toPlainText()
-                    loaded = yaml.safe_load(raw)
+                    restored = self._restore_api_key(raw, self._yaml_text)
+                    loaded = yaml.safe_load(restored)
                     if loaded is None:
                         return {}
                     if not isinstance(loaded, dict):
                         raise ValueError("YAML 顶层必须是对象（key: value）。")
+                    # Fill masked api_key values from env vars or script state
+                    loaded = self._fill_masked_api_keys(loaded)
                     return loaded
+
+                def _fill_masked_api_keys(self, data: dict[str, Any]) -> dict[str, Any]:
+                    """Replace masked api_key values with real ones from env vars or script state."""
+                    import re
+                    env_key = os.getenv("GLM_API_KEY", "")
+                    data = dict(data)
+                    # Top-level glm_api_key
+                    if isinstance(data.get("glm_api_key"), str):
+                        val = data["glm_api_key"]
+                        if val.startswith("*") or re.match(r"^.{1,4}\*+$", val):
+                            data["glm_api_key"] = env_key
+                    # Nested in scripts
+                    scripts = data.get("scripts")
+                    if isinstance(scripts, dict):
+                        new_scripts = {}
+                        for name, cfg in scripts.items():
+                            if isinstance(cfg, dict):
+                                new_cfg = dict(cfg)
+                                ak = new_cfg.get("api_key", "")
+                                if isinstance(ak, str) and (ak.startswith("*") or re.match(r"^.{1,4}\*+$", ak)):
+                                    new_cfg["api_key"] = env_key
+                                new_scripts[name] = new_cfg
+                            else:
+                                new_scripts[name] = cfg
+                        data["scripts"] = new_scripts
+                    return data
 
                 def _save_apply(self) -> None:
                     try:
@@ -637,11 +739,13 @@ class TrayController:
                     if script_configs:
                         payload["scripts"] = script_configs
 
-                    # Save GLM config from OCR script to top-level (never write api_key to YAML)
+                    # Extract GLM config from OCR script for env vars and top-level settings
                     registry = controller.app.registry
                     ocr_entries = registry.get_ocr_scripts()
                     for entry in ocr_entries:
                         ocr_config = entry.script.save_config()
+                        if ocr_config.get("api_key"):
+                            payload["glm_api_key"] = ocr_config["api_key"]
                         if ocr_config.get("model"):
                             payload["glm_model"] = ocr_config["model"]
                         if ocr_config.get("base_url"):
@@ -653,16 +757,7 @@ class TrayController:
                         QMessageBox.warning(self, "开机自启失败", str(exc))
                         return
 
-                    text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
-                    try:
-                        cfg_path = _panel_config_path()
-                        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                        cfg_path.write_text(text, encoding="utf-8")
-                        self.yaml_editor.setPlainText(text)
-                    except Exception as exc:  # noqa: BLE001
-                        QMessageBox.warning(self, "保存失败", str(exc))
-                        return
-
+                    # Set env vars BEFORE stripping api_key from payload for disk storage
                     glm_api_key = payload.get("glm_api_key")
                     glm_model = payload.get("glm_model")
                     glm_base_url = payload.get("glm_base_url")
@@ -672,6 +767,21 @@ class TrayController:
                         os.environ["GLM_MODEL"] = glm_model
                     if isinstance(glm_base_url, str) and glm_base_url:
                         os.environ["GLM_BASE_URL"] = glm_base_url
+
+                    # Strip real api_key values before writing to YAML on disk
+                    disk_payload = self._strip_api_keys(payload)
+                    text = yaml.safe_dump(disk_payload, sort_keys=False, allow_unicode=True)
+                    try:
+                        cfg_path = _panel_config_path()
+                        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                        cfg_path.write_text(text, encoding="utf-8")
+                    except Exception as exc:  # noqa: BLE001
+                        QMessageBox.warning(self, "保存失败", str(exc))
+                        return
+
+                    # Update editor with masked version
+                    self._yaml_text = text
+                    self.yaml_editor.setPlainText(self._hide_api_key(text))
 
                     # Apply script configs
                     scripts_config = payload.get("scripts", {})

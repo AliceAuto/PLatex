@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import os
+import re
 from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -60,8 +61,10 @@ class OcrScript(ScriptBase):
         return True
 
     def load_config(self, config: dict[str, Any]) -> None:
-        if config.get("api_key"):
-            self._api_key = config["api_key"]
+        api_key_val = config.get("api_key", "")
+        # Ignore masked placeholders (e.g. "sk-ab****")
+        if api_key_val and not re.match(r"^.{1,4}\*+$", api_key_val):
+            self._api_key = api_key_val
         elif os.getenv("GLM_API_KEY"):
             self._api_key = os.getenv("GLM_API_KEY")
         if config.get("model"):
@@ -75,9 +78,9 @@ class OcrScript(ScriptBase):
 
     def save_config(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
+        # Save real api_key for persistence (will be hidden in YAML preview)
         if self._api_key:
-            hint = self._api_key[:4] + "*" * (len(self._api_key) - 4) if len(self._api_key) > 4 else "****"
-            result["api_key_hint"] = hint
+            result["api_key"] = self._api_key
         result["model"] = self._model
         result["base_url"] = self._base_url
         return result
