@@ -24,6 +24,9 @@ def convert_hotkey_str(hotkey: str) -> str:
     "Ctrl+Alt+1"  ->  "<ctrl>+<alt>+1"
     "Ctrl+Shift+F5" -> "<ctrl>+<shift>+<f5>"
     """
+    if not hotkey or not hotkey.strip():
+        raise ValueError(f"Invalid hotkey string: {hotkey!r}")
+
     modifiers = {
         "ctrl": "<ctrl>",
         "alt": "<alt>",
@@ -54,9 +57,14 @@ def convert_hotkey_str(hotkey: str) -> str:
     }
 
     parts = hotkey.split("+")
+    if not parts:
+        raise ValueError(f"Invalid hotkey string: {hotkey!r}")
+
     converted: list[str] = []
     for part in parts:
         key = part.strip().lower()
+        if not key:
+            raise ValueError(f"Empty key segment in hotkey string: {hotkey!r}")
         if key in modifiers:
             converted.append(modifiers[key])
         elif key in special_keys:
@@ -83,7 +91,8 @@ class HotkeyListener:
         self._listener: object | None = None
         self._lock = threading.Lock()
         self._running = False
-        self._suspended = False
+        self._suspended = threading.Event()
+        self._suspended.set()
 
     def register(self, hotkey: str, callback: Callable[[], None]) -> None:
         """Register a global hotkey with a callback.
@@ -126,11 +135,11 @@ class HotkeyListener:
 
     def suspend(self) -> None:
         """Temporarily suspend hotkey processing (e.g., during position picking)."""
-        self._suspended = True
+        self._suspended.clear()
 
     def resume(self) -> None:
         """Resume hotkey processing after suspend."""
-        self._suspended = False
+        self._suspended.set()
 
     def _rebuild_listener(self) -> None:
         """Stop the current listener and create a new one with current bindings."""
@@ -144,11 +153,13 @@ class HotkeyListener:
 
             def _make_callback(callback: Callable[[], None]) -> Callable[[], None]:
                 def _wrapped() -> None:
-                    if not self._suspended:
-                        try:
-                            callback()
-                        except Exception:  # noqa: BLE001
-                            logger.exception("Error in hotkey callback")
+                    if not self._suspended.is_set():
+                        return
+                    try:
+                        callback()
+                    except Exception:  # noqa: BLE001
+                        logger.exception("Error in hotkey callback")
+
                 return _wrapped
 
             wrapped_bindings[pynput_key] = _make_callback(cb)
@@ -165,8 +176,8 @@ class HotkeyListener:
         if self._listener is not None:
             try:
                 self._listener.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Failed to stop listener cleanly: %s", exc)
             self._listener = None
 
 
@@ -180,9 +191,11 @@ def simulate_click(x: int, y: int, button: str = "left") -> None:
         mouse = _MouseController()
         original_pos = mouse.position
         btn = _MouseButton.left if button == "left" else _MouseButton.right
-        mouse.position = (x, y)
-        mouse.click(btn)
-        mouse.position = original_pos
+        try:
+            mouse.position = (x, y)
+            mouse.click(btn)
+        finally:
+            mouse.position = original_pos
         logger.info("Simulated %s click at (%d, %d), restored to %s", button, x, y, original_pos)
     except Exception:  # noqa: BLE001
         logger.exception("Failed to simulate click at (%d, %d)", x, y)

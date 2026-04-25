@@ -119,8 +119,13 @@ class OcrScript(ScriptBase):
             raise RuntimeError(f"GLM HTTP error {exc.code}: {error_body}") from exc
         except URLError as exc:
             raise RuntimeError(f"GLM request failed: {exc.reason}") from exc
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            raise RuntimeError(f"GLM network error: {exc}") from exc
 
-        data = json.loads(response_body)
+        try:
+            data = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"GLM returned invalid JSON (first 200 chars: {response_body[:200]}): {exc}") from exc
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             raise RuntimeError(f"GLM returned invalid response: {json.dumps(data, ensure_ascii=False)}")

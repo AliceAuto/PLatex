@@ -48,14 +48,18 @@ class HotkeyClickScript(ScriptBase):
             return
         if 0 <= idx < len(self._entries):
             entry = self._entries[idx]
-            x = int(entry.get("x", 0))
-            y = int(entry.get("y", 0))
+            x = int(entry.get("x", 0)) if isinstance(entry.get("x"), (int, float)) else 0
+            y = int(entry.get("y", 0)) if isinstance(entry.get("y"), (int, float)) else 0
             button = entry.get("button", "left")
             logger.info("Hotkey click: action=%s pos=(%d,%d) button=%s", action, x, y, button)
             simulate_click(x, y, button)
 
     def load_config(self, config: dict[str, Any]) -> None:
-        self._entries = list(config.get("entries", []))
+        raw_entries = config.get("entries", [])
+        if not isinstance(raw_entries, list):
+            logger.warning("hotkey_click entries must be a list, got %s", type(raw_entries).__name__)
+            raw_entries = []
+        self._entries = [dict(e) if isinstance(e, dict) else {} for e in raw_entries]
 
     def save_config(self) -> dict[str, Any]:
         return {"entries": [dict(e) for e in self._entries]}

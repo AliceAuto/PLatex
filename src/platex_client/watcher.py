@@ -17,29 +17,31 @@ class ClipboardWatcher:
     history: HistoryStore
     source_name: str
     last_image_hash: str | None = None
-    last_image_time: float | None = None
-    ocr_start_time: float | None = None
+    ocr_start_time: float | None = field(default=None, init=False, repr=False)
     _processing_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
-    _publishing: bool = field(default=False, init=False, repr=False)
+    _publishing: threading.Event = field(default_factory=threading.Event, init=False, repr=False)
     logger: logging.Logger = field(default_factory=lambda: logging.getLogger("platex.watcher"), init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        self._publishing.set()
+
     def set_publishing(self, is_publishing: bool) -> None:
-        self._publishing = is_publishing
+        if is_publishing:
+            self._publishing.clear()
+        else:
+            self._publishing.set()
 
     def poll_once(self, *, force: bool = False) -> ClipboardEvent | None:
-        # Skip processing if currently publishing to clipboard
-        if self._publishing:
+        if not self._publishing.is_set():
             self.logger.debug("Skipping poll during clipboard publish/restore")
             return None
 
-        # Skip if OCR is still processing previous image (prevent queuing during long OCR operations)
         if self.ocr_start_time is not None:
             ocr_elapsed = time.time() - self.ocr_start_time
-            if ocr_elapsed < 15.0:  # Typical OCR takes 8-12 seconds, allow up to 15s
+            if ocr_elapsed < 15.0:
                 self.logger.debug("Skipping poll during OCR processing (%.1fs elapsed)", ocr_elapsed)
                 return None
             else:
-                # OCR took too long, assume it crashed and reset the flag
                 self.ocr_start_time = None
 
         with self._processing_lock:
@@ -49,19 +51,16 @@ class ClipboardWatcher:
                 return None
 
             current_hash = image_hash(image.image_bytes)
-            current_time = time.time()
 
             if not force and current_hash == self.last_image_hash:
                 self.logger.debug("Skipping already processed clipboard image: %s", current_hash[:10])
                 return None
 
             self.last_image_hash = current_hash
-            self.last_image_time = current_time
-        
-        # Release lock before expensive OCR operation
+
         now = datetime.now(timezone.utc)
-        self.ocr_start_time = time.time()  # Mark OCR as started
-        self.logger.info("OCR start hash=%s size=%sx%s source=%s", current_hash[:10], image.width, image.height, self.source_name)
+        self.ocr_start_time = time.time()
+        self.logger.info("OCR start hash=%s size=%dx%d source=%s", current_hash[:10], image.width, image.height, self.source_name)
 
         try:
             latex = self.processor.process_image(
@@ -97,7 +96,11 @@ class ClipboardWatcher:
                 error=str(exc),
             )
         finally:
-            self.ocr_start_time = None  # Mark OCR as completed
+            self.ocr_start_time = None
 
-        self.history.add(event)
+        try:
+            self.history.add(event)
+        except Exception as db_exc:
+            self.logger.error("Failed to persist event to history: %s", db_exc)
+
         return event

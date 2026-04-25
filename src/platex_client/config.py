@@ -51,27 +51,42 @@ def _candidate_config_paths(config_path: Path | None) -> list[Path]:
     ]
 
 
+def _parse_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.lower() not in ("false", "0", "no", "")
+    return bool(value)
+
+
 def load_config(config_path: Path | None = None) -> AppConfig:
     path = next((candidate for candidate in _candidate_config_paths(config_path) if candidate.exists()), None)
     if path is None:
         return AppConfig()
 
-    with path.open("r", encoding="utf-8") as handle:
-        if path.suffix.lower() == ".json":
-            payload = json.load(handle)
-        else:
-            payload = yaml.safe_load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            if path.suffix.lower() == ".json":
+                payload = json.load(handle)
+            else:
+                payload = yaml.safe_load(handle)
+    except (yaml.YAMLError, json.JSONDecodeError, OSError) as exc:
+        raise ValueError(f"Failed to load configuration from {path}: {exc}") from exc
 
     payload = payload or {}
     if not isinstance(payload, dict):
         raise ValueError(f"Configuration file must contain a mapping: {path}")
 
+    raw_interval = float(payload.get("interval", 0.8))
+    if raw_interval <= 0:
+        raw_interval = 0.8
+
     return AppConfig(
-        db_path=Path(payload["db_path"]) if payload.get("db_path") else None,
-        script=Path(payload["script"]) if payload.get("script") else None,
-        log_file=Path(payload["log_file"]) if payload.get("log_file") else None,
-        interval=float(payload.get("interval", 0.8)),
-        isolate_mode=bool(payload.get("isolate_mode", False)),
+        db_path=Path(payload["db_path"].strip()) if isinstance(payload.get("db_path"), str) and payload["db_path"].strip() else None,
+        script=Path(payload["script"].strip()) if isinstance(payload.get("script"), str) and payload["script"].strip() else None,
+        log_file=Path(payload["log_file"].strip()) if isinstance(payload.get("log_file"), str) and payload["log_file"].strip() else None,
+        interval=raw_interval,
+        isolate_mode=_parse_bool(payload.get("isolate_mode", False)),
         glm_api_key=payload.get("glm_api_key"),
         glm_model=payload.get("glm_model"),
         glm_base_url=payload.get("glm_base_url"),

@@ -111,7 +111,11 @@ class ScriptRegistry:
 
     def load_script_file(self, path: Path, enabled: bool = True) -> ScriptEntry | None:
         """Load a single script file and register it."""
-        entry = self._load_script_file(path)
+        try:
+            entry = self._load_script_file(path)
+        except Exception as exc:
+            logger.exception("Failed to load script %s: %s", path, exc)
+            return None
         if entry is not None:
             entry.enabled = enabled
         return entry
@@ -156,6 +160,9 @@ class ScriptRegistry:
         """
         for name, entry in self._entries.items():
             script_config = configs.get(name, {})
+            if not isinstance(script_config, dict):
+                logger.warning("Invalid config for script %s: expected dict, got %s", name, type(script_config).__name__)
+                script_config = {}
             entry.enabled = script_config.get("enabled", True)
             entry.script.load_config(script_config)
 
@@ -163,8 +170,10 @@ class ScriptRegistry:
         """Collect configs from all scripts and return as {script_name: config_dict}."""
         result: dict[str, dict[str, Any]] = {}
         for name, entry in self._entries.items():
-            config = entry.script.save_config()
-            config["enabled"] = entry.enabled
+config = entry.script.save_config()
+        if not isinstance(config, dict):
+            config = {}
+        config["enabled"] = entry.enabled
             result[name] = config
         return result
 

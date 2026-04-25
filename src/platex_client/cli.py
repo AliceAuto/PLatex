@@ -87,6 +87,7 @@ def _acquire_single_instance_lock() -> bool:
     lock_file = lock_dir / "platex-client.lock"
 
     handle = open(lock_file, "a+b")
+    handle.seek(0)
     try:
         msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
     except OSError:
@@ -107,6 +108,7 @@ def _release_single_instance_lock() -> None:
     try:
         if sys.platform == "win32":
             try:
+                handle.seek(0)
                 msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
             except OSError:
                 pass

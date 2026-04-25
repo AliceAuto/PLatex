@@ -75,13 +75,13 @@ class ScriptBase(ABC):
         p = Path(path) if not isinstance(path, Path) else path
         if not p.exists():
             raise FileNotFoundError(f"Config file not found: {p}")
-        loaded = yaml.safe_load(p.read_text(encoding="utf-8"))
-        if loaded is None:
+        imported = yaml.safe_load(p.read_text(encoding="utf-8"))
+        if imported is None:
             return {}
-        if not isinstance(loaded, dict):
+        if not isinstance(imported, dict):
             raise ValueError("Config file must contain a YAML mapping.")
-        self.load_config(loaded)
-        return loaded
+        self.load_config(imported)
+        return imported
 
     def export_config(self, path: Any) -> None:
         """Export configuration to a file path.
@@ -105,4 +105,6 @@ class ScriptBase(ABC):
 
         Only called when has_ocr_capability() returns True.
         """
-        raise NotImplementedError
+        if self.has_ocr_capability():
+            raise NotImplementedError(f"{self.name} must implement process_image()")
+        raise RuntimeError(f"Script {self.name} does not have OCR capability")

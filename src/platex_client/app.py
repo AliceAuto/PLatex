@@ -65,7 +65,8 @@ class PlatexApp:
                         self.on_ocr_success(event)
                 except Exception as exc:  # noqa: BLE001
                     self.logger.exception("Error in clipboard poll loop: %s", exc)
-                self._stop_event.wait(self.interval)
+                wait_time = max(self.interval, 0.1)
+                self._stop_event.wait(wait_time)
 
         self._worker = threading.Thread(target=run, name="platex-watcher", daemon=True)
         self._worker.start()
@@ -105,15 +106,15 @@ class PlatexApp:
             for hotkey, action in bindings.items():
                 script_ref = entry.script
 
-                def _make_cb(s: object, a: str) -> Callable[[], None]:
+                def _make_cb(s: object, a: str, log: logging.Logger) -> Callable[[], None]:
                     def _cb() -> None:
                         try:
                             s.on_hotkey(a)  # type: ignore[attr-defined]
                         except Exception:  # noqa: BLE001
-                            logger.exception("Error in hotkey callback for %s", a)
+                            log.exception("Error in hotkey callback for %s", a)
                     return _cb
 
-                self.hotkey_listener.register(hotkey, _make_cb(script_ref, action))
+                self.hotkey_listener.register(hotkey, _make_cb(script_ref, action, self.logger))
                 self.logger.info("Registered hotkey: %s -> %s.%s", hotkey, entry.script.name, action)
 
         try:
@@ -135,8 +136,8 @@ class PlatexApp:
         for entry in self.registry.get_all_scripts():
             try:
                 entry.script.deactivate()
-            except Exception:
-                pass
+            except Exception as exc:
+                self.logger.debug("Failed to deactivate script %s: %s", entry.script.name, exc)
         if self._worker is not None:
             self._worker.join(timeout=2.0)
 

@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import logging
 from hashlib import sha256
 from io import BytesIO
 from typing import Any
-import logging
+
 import time
 
 from PIL import Image, ImageGrab
 
-from .windows_clipboard import _clipboard_lock, set_text
 from .models import ClipboardImage
-
+from .windows_clipboard import _clipboard_lock, set_text
 
 logger = logging.getLogger("platex.clipboard")
+
+_MAX_IMAGE_SIZE = 20 * 1024 * 1024
 
 
 def grab_image_clipboard() -> ClipboardImage | None:
@@ -27,13 +29,21 @@ def grab_image_clipboard() -> ClipboardImage | None:
 
             buffer = BytesIO()
             content.save(buffer, format="PNG")
-            return ClipboardImage(image_bytes=buffer.getvalue(), width=content.width, height=content.height)
-        except OSError as exc:
+            image_bytes = buffer.getvalue()
+            if len(image_bytes) > _MAX_IMAGE_SIZE:
+                logger.warning("Clipboard image too large (%d bytes), skipping", len(image_bytes))
+                return None
+
+            return ClipboardImage(image_bytes=image_bytes, width=content.width, height=content.height)
+        except (OSError, ValueError, RuntimeError) as exc:
             if attempt < max_retries:
                 logger.debug("Clipboard read attempt %s/%s failed: %s", attempt, max_retries, exc)
                 time.sleep(0.12 * attempt)
                 continue
             logger.debug("Clipboard read failed after retries: %s", exc)
+            return None
+        except Exception as exc:
+            logger.exception("Unexpected error reading clipboard: %s", exc)
             return None
 
 
@@ -42,4 +52,7 @@ def image_hash(image_bytes: bytes) -> str:
 
 
 def copy_text_to_clipboard(text: str) -> None:
-    set_text(text)
+    try:
+        set_text(text)
+    except Exception as exc:
+        logger.error("Failed to copy text to clipboard: %s", exc)

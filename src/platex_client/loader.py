@@ -28,7 +28,10 @@ def load_script_processor(script_path: Path) -> "OcrProcessorAdapter":
         raise RuntimeError(f"Unable to load script from {script_path}")
 
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to execute script {script_path}: {exc}") from exc
 
     # Try new-style: module has create_script() -> ScriptBase
     create_fn = getattr(module, "create_script", None)
@@ -36,6 +39,8 @@ def load_script_processor(script_path: Path) -> "OcrProcessorAdapter":
         script = create_fn()
         if isinstance(script, ScriptBase):
             return OcrProcessorAdapter(script)
+        if script is not None:
+            logger.warning("create_script() returned %s (expected ScriptBase)", type(script).__name__)
 
     # Try legacy: module has process_image() function
     process_image_fn = getattr(module, "process_image", None)
