@@ -21,13 +21,20 @@ ArchitecturesInstallIn64BitMode=x64
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=assets\platex-client.ico
 
+[Registry]
+Root: HKCU; Subkey: "Software\PLatexClient"; Flags: dontdeletekey
+
+[UninstallDelete]
+; Never delete config/data directories or registry during uninstall
+; The [Registry] entry with dontdeletekey flag ensures registry is preserved
+
 [Code]
 var
   ConfigDirPage: TInputDirWizardPage;
 
 procedure InitializeWizard;
 begin
-  ConfigDirPage := CreateInputDirPage(wpSelectDir,
+  ConfigDirPage := CreateInputDirWizardPage(wpSelectDir,
     '选择配置目录', '配置文件存储位置',
     '选择 PLatex Client 存储配置、历史记录和日志的目录。' + #13#10 +
     '如果不确定，请使用默认路径。',
@@ -57,6 +64,22 @@ end;
 function GetConfigDir(Param: string): string;
 begin
   Result := ConfigDirPage.Values[0];
+end;
+
+function InitializeUninstall(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := True;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep = usPostUninstall then
+  begin
+    // Keep config directory and registry intact for reinstall.
+    // Only remove application files (handled by Inno Setup automatically).
+  end;
 end;
 
 [Tasks]
