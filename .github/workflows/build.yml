@@ -2,11 +2,8 @@ name: Build PLatex
 
 on:
   push:
-    branches:
-      - main
-      - master
-      - release/*
-  pull_request:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -54,3 +51,9 @@ jobs:
           name: platex-client-windows-build
           path: |
             dist/installer/*.exe
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/installer/*.exe
+          generate_release_notes: true
