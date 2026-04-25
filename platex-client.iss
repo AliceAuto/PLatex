@@ -22,65 +22,11 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=assets\platex-client.ico
 
 [Registry]
-Root: HKCU; Subkey: "Software\PLatexClient"; ValueType: none; Flags: uninsdeletekeyifempty
+Root: HKCU; Subkey: "Software\PLatexClient"; ValueType: string; ValueName: "ConfigDir"; ValueData: "{userappdata}\PLatexClient"; Flags: createvalueifdoesntexist uninsdeletekeyifempty
 
 [UninstallDelete]
-; Never delete config/data directories or registry during uninstall
-; The [Registry] entry with dontdeletekey flag ensures registry is preserved
-
-[Code]
-var
-  ConfigDirPage: TInputDirWizardPage;
-
-procedure InitializeWizard;
-begin
-  ConfigDirPage := CreateInputDirWizardPage(wpSelectDir,
-    '选择配置目录', '配置文件存储位置',
-    '选择 PLatex Client 存储配置、历史记录和日志的目录。' + #13#10 +
-    '如果不确定，请使用默认路径。',
-    False, '');
-  ConfigDirPage.Add('');
-  ConfigDirPage.Values[0] := ExpandConstant('{userappdata}\PLatexClient');
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-var
-  RegKey: string;
-  ConfigDir: string;
-begin
-  if CurStep = ssPostInstall then
-  begin
-    ConfigDir := ConfigDirPage.Values[0];
-    if ConfigDir <> '' then
-    begin
-      RegKey := 'Software\PLatexClient';
-      RegWriteStringValue(HKCU, RegKey, 'ConfigDir', ConfigDir);
-      ForceDirectories(ConfigDir);
-      ForceDirectories(ConfigDir + '\logs');
-    end;
-  end;
-end;
-
-function GetConfigDir(Param: string): string;
-begin
-  Result := ConfigDirPage.Values[0];
-end;
-
-function InitializeUninstall(): Boolean;
-var
-  ResultCode: Integer;
-begin
-  Result := True;
-end;
-
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-begin
-  if CurUninstallStep = usPostUninstall then
-  begin
-    // Keep config directory and registry intact for reinstall.
-    // Only remove application files (handled by Inno Setup automatically).
-  end;
-end;
+; Never delete config/data directories during uninstall
+; Only application files are removed by Inno Setup automatically
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: unchecked
