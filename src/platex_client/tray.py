@@ -17,6 +17,7 @@ import yaml
 from .app import PlatexApp
 from .clipboard import copy_text_to_clipboard
 from .config import default_config_path
+from .config_manager import ConfigManager, get_config_dir, set_config_dir, config_file_path
 from .history import HistoryStore
 from .models import ClipboardEvent
 
@@ -58,7 +59,7 @@ def _panel_config_path() -> Path:
     candidates = [
         cwd / "config.yaml",
         cwd / "config.example.yaml",
-        default_config_path(),
+        config_file_path(),
     ]
     path = next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +100,9 @@ def _load_panel_config(default_script: Path) -> dict[str, Any]:
 
 def _save_panel_config(payload: dict[str, Any]) -> None:
     clean = {k: v for k, v in payload.items() if v not in (None, "")}
-    _panel_config_path().write_text(yaml.safe_dump(clean, sort_keys=False, allow_unicode=True), encoding="utf-8")
+    path = _panel_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(clean, sort_keys=False, allow_unicode=True), encoding="utf-8")
 
 
 def _startup_command() -> str:
@@ -213,7 +216,6 @@ class TrayController:
         if active_script.exists():
             self.app.script_path = active_script
 
-        # Load script configs from the panel config
         if private_cfg.get("scripts"):
             self.app.registry.load_configs(private_cfg["scripts"])
 
@@ -231,8 +233,10 @@ class TrayController:
                     QApplication,
                     QCheckBox,
                     QComboBox,
+                    QFileDialog,
                     QHBoxLayout,
                     QLabel,
+                    QLineEdit,
                     QMessageBox,
                     QPlainTextEdit,
                     QPushButton,
@@ -386,6 +390,28 @@ class TrayController:
                     lang_row.addWidget(self.ui_language)
                     layout.addLayout(lang_row)
 
+                    config_dir_row = QHBoxLayout()
+                    config_dir_row.addWidget(QLabel("配置目录:"))
+                    self._config_dir_edit = QLineEdit(str(get_config_dir()))
+                    self._config_dir_edit.setReadOnly(True)
+                    config_dir_row.addWidget(self._config_dir_edit, 1)
+                    btn_change_dir = QPushButton("更改")
+                    btn_change_dir.clicked.connect(self._change_config_dir)
+                    config_dir_row.addWidget(btn_change_dir)
+                    layout.addLayout(config_dir_row)
+
+                    io_row = QHBoxLayout()
+                    btn_export_all = QPushButton("导出全部配置")
+                    btn_import_all = QPushButton("导入全部配置")
+                    btn_export_all.setStyleSheet("QPushButton { padding: 6px 12px; }")
+                    btn_import_all.setStyleSheet("QPushButton { padding: 6px 12px; }")
+                    btn_export_all.clicked.connect(self._export_all_config)
+                    btn_import_all.clicked.connect(self._import_all_config)
+                    io_row.addWidget(btn_export_all)
+                    io_row.addWidget(btn_import_all)
+                    io_row.addStretch()
+                    layout.addLayout(io_row)
+
                     layout.addWidget(QLabel("配置文件（完整 YAML，可滚动编辑）"))
                     self.yaml_editor = QPlainTextEdit()
                     self.yaml_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
@@ -403,9 +429,129 @@ class TrayController:
                             widget = script.create_settings_widget(self._tab_widget)
                         except Exception:
                             widget = None
+
                         if widget is not None:
-                            self._script_tabs[script.name] = widget
-                            self._tab_widget.addTab(widget, script.display_name)
+                            per_script_io = QWidget()
+                            per_layout = QVBoxLayout(per_script_io)
+                            per_layout.setContentsMargins(0, 0, 0, 0)
+                            per_layout.setSpacing(6)
+
+                            per_layout.addWidget(widget)
+
+                            script_io_row = QHBoxLayout()
+                            btn_export = QPushButton(f"导出 {script.display_name} 配置")
+                            btn_import = QPushButton(f"导入 {script.display_name} 配置")
+                            btn_export.clicked.connect(lambda checked, sn=script.name: self._export_script_config(sn))
+                            btn_import.clicked.connect(lambda checked, sn=script.name: self._import_script_config(sn))
+                            script_io_row.addWidget(btn_export)
+                            script_io_row.addWidget(btn_import)
+                            script_io_row.addStretch()
+                            per_layout.addLayout(script_io_row)
+
+                            save_fn = getattr(widget, "save_settings", None)
+                            if callable(save_fn):
+                                self._script_tabs[script.name] = widget
+
+                            self._tab_widget.addTab(per_script_io, script.display_name)
+
+                def _change_config_dir(self) -> None:
+                    current = get_config_dir()
+                    new_dir = QFileDialog.getExistingDirectory(
+                        self, "选择配置目录", str(current),
+                    )
+                    if not new_dir:
+                        return
+                    new_path = Path(new_dir)
+                    try:
+                        set_config_dir(new_path)
+                        self._config_dir_edit.setText(str(new_path))
+                        QMessageBox.information(
+                            self, "配置目录已更改",
+                            f"配置目录已设置为:\n{new_path}\n\n"
+                            "如需迁移已有配置，请手动复制旧目录中的文件到新目录。\n"
+                            "重启后生效。",
+                        )
+                    except Exception as exc:
+                        QMessageBox.warning(self, "更改失败", str(exc))
+
+                def _export_all_config(self) -> None:
+                    filepath, _ = QFileDialog.getSaveFileName(
+                        self, "导出全部配置", str(Path.cwd() / "platex-config.yaml"),
+                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
+                    )
+                    if not filepath:
+                        return
+                    try:
+                        mgr = ConfigManager(controller.app.registry)
+                        mgr.export_all(Path(filepath))
+                        QMessageBox.information(self, "导出成功", f"配置已导出到:\n{filepath}")
+                    except Exception as exc:
+                        QMessageBox.warning(self, "导出失败", str(exc))
+
+                def _import_all_config(self) -> None:
+                    filepath, _ = QFileDialog.getOpenFileName(
+                        self, "导入全部配置", str(Path.cwd()),
+                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
+                    )
+                    if not filepath:
+                        return
+                    try:
+                        mgr = ConfigManager(controller.app.registry)
+                        result = mgr.import_all(Path(filepath))
+                    except Exception as exc:
+                        QMessageBox.warning(self, "导入失败", str(exc))
+                        return
+
+                    general = result.get("general", {})
+                    scripts = result.get("scripts", {})
+
+                    if general:
+                        yaml_text = yaml.safe_dump(general, sort_keys=False, allow_unicode=True)
+                        self.yaml_editor.setPlainText(yaml_text)
+                        self._sync_ui_from_yaml()
+
+                    if scripts and controller.app.registry:
+                        controller.app.registry.load_configs(scripts)
+
+                    QMessageBox.information(self, "导入成功", "配置已导入。请检查后点击「保存并应用」。")
+
+                def _export_script_config(self, script_name: str) -> None:
+                    filepath, _ = QFileDialog.getSaveFileName(
+                        self, f"导出 {script_name} 配置",
+                        str(Path.cwd() / f"{script_name}-config.yaml"),
+                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
+                    )
+                    if not filepath:
+                        return
+                    try:
+                        mgr = ConfigManager(controller.app.registry)
+                        mgr.export_script(script_name, Path(filepath))
+                        QMessageBox.information(self, "导出成功", f"配置已导出到:\n{filepath}")
+                    except Exception as exc:
+                        QMessageBox.warning(self, "导出失败", str(exc))
+
+                def _import_script_config(self, script_name: str) -> None:
+                    filepath, _ = QFileDialog.getOpenFileName(
+                        self, f"导入 {script_name} 配置", str(Path.cwd()),
+                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
+                    )
+                    if not filepath:
+                        return
+                    try:
+                        mgr = ConfigManager(controller.app.registry)
+                        _, config = mgr.import_script(Path(filepath))
+                        entry = controller.app.registry.get(script_name)
+                        if entry:
+                            entry.script.load_config(config)
+                            # Refresh the script's UI widget if possible
+                            widget = self._script_tabs.get(script_name)
+                            if widget is not None:
+                                load_fn = getattr(widget, "load_settings", None)
+                                if callable(load_fn):
+                                    load_fn()
+                        QMessageBox.information(self, "导入成功", f"{script_name} 配置已导入。请点击「保存并应用」。")
+                    except Exception as exc:
+                        QMessageBox.warning(self, "导入失败", str(exc))
 
                 def _sync_ui_from_yaml(self) -> None:
                     payload: dict[str, Any] = {}
@@ -431,7 +577,6 @@ class TrayController:
                     seed = dict(private_cfg)
                     seed["script"] = str(controller.app.script_path)
                     seed["auto_start"] = bool(_is_startup_enabled() or seed.get("auto_start", False))
-                    # Include script configs
                     script_configs = controller.app.registry.save_configs()
                     if script_configs:
                         seed["scripts"] = script_configs
@@ -476,12 +621,11 @@ class TrayController:
                     payload["ui_language"] = ui_language
 
                     # Collect script-specific configs from UI widgets
-                    script_configs: dict[str, dict[str, Any]] = {}
                     for name, widget in self._script_tabs.items():
                         save_fn = getattr(widget, "save_settings", None)
                         if callable(save_fn):
                             save_fn()
-                    # Get updated configs from scripts
+                    script_configs: dict[str, dict[str, Any]] = {}
                     for name, entry in controller.app.registry.entries.items():
                         script_configs[name] = entry.script.save_config()
                         script_configs[name]["enabled"] = entry.enabled
@@ -506,7 +650,9 @@ class TrayController:
 
                     text = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
                     try:
-                        _panel_config_path().write_text(text, encoding="utf-8")
+                        cfg_path = _panel_config_path()
+                        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                        cfg_path.write_text(text, encoding="utf-8")
                         self.yaml_editor.setPlainText(text)
                     except Exception as exc:  # noqa: BLE001
                         QMessageBox.warning(self, "保存失败", str(exc))

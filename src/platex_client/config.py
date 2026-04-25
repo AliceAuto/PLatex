@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
-from platformdirs import user_config_dir
+
+from .config_manager import config_file_path
 
 
 @dataclass(slots=True)
@@ -30,11 +31,12 @@ class AppConfig:
 
 
 def default_config_path() -> Path:
-    return Path(user_config_dir("PLatexClient", "Copilot")) / "config.yaml"
+    return config_file_path()
 
 
 def default_log_path() -> Path:
-    return Path(user_config_dir("PLatexClient", "Copilot")) / "logs" / "platex-client.log"
+    from .config_manager import log_file_path
+    return log_file_path()
 
 
 def _candidate_config_paths(config_path: Path | None) -> list[Path]:
@@ -45,7 +47,7 @@ def _candidate_config_paths(config_path: Path | None) -> list[Path]:
     return [
         cwd / "config.yaml",
         cwd / "config.example.yaml",
-        default_config_path(),
+        config_file_path(),
     ]
 
 
