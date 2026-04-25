@@ -9,6 +9,9 @@ on:
 permissions:
   contents: write
 
+env:
+  INNO_SETUP_VERSION: "6.4.2"
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -28,7 +31,9 @@ jobs:
           python -m pip install -e .
 
       - name: Install Inno Setup
-        run: choco install innosetup -y
+        run: |
+          choco install innosetup --version="${env:INNO_SETUP_VERSION}" -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /?
 
       - name: Build executable
         run: |
