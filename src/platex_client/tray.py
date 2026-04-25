@@ -341,7 +341,7 @@ class TrayController:
                     self._controller = controller_ref
                     self.setWindowTitle("PLatex 控制面板")
                     self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    self.setMinimumSize(700, 560)
+                    self.setMinimumSize(800, 600)
 
                     root = QVBoxLayout(self)
                     root.setContentsMargins(14, 14, 14, 14)
@@ -488,13 +488,11 @@ class TrayController:
                     if script_configs:
                         payload["scripts"] = script_configs
 
-                    # Save GLM config from OCR script to top-level
+                    # Save GLM config from OCR script to top-level (never write api_key to YAML)
                     registry = controller.app.registry
                     ocr_entries = registry.get_ocr_scripts()
                     for entry in ocr_entries:
                         ocr_config = entry.script.save_config()
-                        if ocr_config.get("api_key"):
-                            payload["glm_api_key"] = ocr_config["api_key"]
                         if ocr_config.get("model"):
                             payload["glm_model"] = ocr_config["model"]
                         if ocr_config.get("base_url"):

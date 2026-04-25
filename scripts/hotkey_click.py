@@ -78,6 +78,7 @@ class HotkeyClickScript(ScriptBase):
                 QScrollArea,
                 QFrame,
                 QKeySequenceEdit,
+                QLineEdit,
             )
             from PyQt6.QtGui import QKeySequence
         except ImportError:
@@ -100,7 +101,8 @@ class HotkeyClickScript(ScriptBase):
                 self.setCursor(Qt.CursorShape.CrossCursor)
                 self.setStyleSheet("background: transparent;")
 
-                from PyQt6.QtWidgets import QApplication, QScreen
+                from PyQt6.QtGui import QScreen
+                from PyQt6.QtWidgets import QApplication
 
                 screens = QApplication.screens()
                 if screens:
@@ -152,67 +154,104 @@ class HotkeyClickScript(ScriptBase):
                 self.entry = dict(entry)
                 self.setFrameShape(QFrame.Shape.StyledPanel)
                 self.setStyleSheet(
-                    "QFrame { border: 1px solid #d0d0d0; border-radius: 6px; padding: 6px; }"
+                    "QFrame { border: 1px solid #c8d0dc; border-radius: 8px; background: #fafbfc; padding: 2px; }"
                 )
 
-                layout = QHBoxLayout(self)
-                layout.setContentsMargins(8, 4, 8, 4)
-                layout.setSpacing(8)
+                outer = QVBoxLayout(self)
+                outer.setContentsMargins(10, 8, 10, 8)
+                outer.setSpacing(6)
 
-                # Hotkey capture
-                hotkey_label = QLabel("\u5feb\u6377\u952e:")
-                layout.addWidget(hotkey_label)
+                # Row 1: hotkey | button type | delete
+                row1 = QHBoxLayout()
+                row1.setSpacing(10)
 
+                row1.addWidget(QLabel("\u5feb\u6377\u952e:"))
                 self._hotkey_edit = QKeySequenceEdit()
+                self._hotkey_edit.setMinimumWidth(140)
                 existing = entry.get("hotkey", "")
                 if existing:
                     seq = QKeySequence(existing)
                     self._hotkey_edit.setKeySequence(seq)
                 self._hotkey_edit.keySequenceChanged.connect(self._on_hotkey_changed)
-                layout.addWidget(self._hotkey_edit)
+                row1.addWidget(self._hotkey_edit, 1)
 
-                # X coordinate
-                layout.addWidget(QLabel("X:"))
-                self._x_spin = QSpinBox()
-                self._x_spin.setRange(0, 10000)
-                self._x_spin.setValue(int(entry.get("x", 0)))
-                self._x_spin.valueChanged.connect(self._on_value_changed)
-                layout.addWidget(self._x_spin)
-
-                # Y coordinate
-                layout.addWidget(QLabel("Y:"))
-                self._y_spin = QSpinBox()
-                self._y_spin.setRange(0, 10000)
-                self._y_spin.setValue(int(entry.get("y", 0)))
-                self._y_spin.valueChanged.connect(self._on_value_changed)
-                layout.addWidget(self._y_spin)
-
-                # Button selection
-                layout.addWidget(QLabel("\u952e:"))
+                row1.addWidget(QLabel("\u9f20\u6807\u952e:"))
                 self._button_combo = QComboBox()
                 self._button_combo.addItem("\u5de6\u952e", "left")
                 self._button_combo.addItem("\u53f3\u952e", "right")
+                self._button_combo.setMinimumWidth(70)
                 btn = entry.get("button", "left")
                 idx = self._button_combo.findData(btn)
                 if idx >= 0:
                     self._button_combo.setCurrentIndex(idx)
                 self._button_combo.currentIndexChanged.connect(self._on_value_changed)
-                layout.addWidget(self._button_combo)
+                row1.addWidget(self._button_combo)
 
-                # Pick position button
-                btn_pick = QPushButton("\uD83D\uDCCD\u62FE\u53d6\u5750\u6807")
-                btn_pick.setToolTip("\u70b9\u51fb\u540e\u5728\u5c4f\u5e55\u4e0a\u9009\u62e9\u4f4d\u7f6e")
-                btn_pick.clicked.connect(self._pick_position)
-                layout.addWidget(btn_pick)
-
-                # Remove button
                 btn_remove = QPushButton("\u2715")
-                btn_remove.setFixedWidth(30)
-                btn_remove.setStyleSheet("color: #cc3333; font-weight: bold;")
-                btn_remove.clicked.connect(lambda: self.remitted.emit(self))
-                layout.addWidget(btn_remove)
+                btn_remove.setFixedSize(28, 28)
+                btn_remove.setToolTip("\u5220\u9664\u6b64\u5feb\u6377\u952e")
+                btn_remove.setStyleSheet(
+                    "QPushButton { color: #cc3333; font-weight: bold; border: 1px solid #ddd; border-radius: 4px; background: #fff; }"
+                    "QPushButton:hover { background: #fee; }"
+                )
+                btn_remove.clicked.connect(lambda: self.removed.emit(self))
+                row1.addWidget(btn_remove)
 
-                layout.addStretch()
+                outer.addLayout(row1)
+
+                # Row 2: X Y spinboxes | pick position
+                row2 = QHBoxLayout()
+                row2.setSpacing(10)
+
+                row2.addWidget(QLabel("X:"))
+                self._x_spin = QSpinBox()
+                self._x_spin.setRange(0, 9999)
+                self._x_spin.setMinimumWidth(80)
+                self._x_spin.setValue(int(entry.get("x", 0)))
+                self._x_spin.valueChanged.connect(self._on_value_changed)
+                row2.addWidget(self._x_spin)
+
+                row2.addWidget(QLabel("Y:"))
+                self._y_spin = QSpinBox()
+                self._y_spin.setRange(0, 9999)
+                self._y_spin.setMinimumWidth(80)
+                self._y_spin.setValue(int(entry.get("y", 0)))
+                self._y_spin.valueChanged.connect(self._on_value_changed)
+                row2.addWidget(self._y_spin)
+
+                row2.addSpacing(6)
+
+                btn_pick = QPushButton("\uD83D\uDCCD \u62FE\u53d6\u5750\u6807")
+                btn_pick.setToolTip("\u70b9\u51fb\u540e\u5728\u5c4f\u5e55\u4e0a\u70b9\u51fb\u9009\u62e9\u76ee\u6807\u4f4d\u7f6e")
+                btn_pick.setMinimumWidth(100)
+                btn_pick.setStyleSheet(
+                    "QPushButton { padding: 4px 12px; border: 1px solid #7aa2ff; border-radius: 4px; background: #eef3ff; color: #3366cc; }"
+                    "QPushButton:hover { background: #dbe5ff; }"
+                )
+                btn_pick.clicked.connect(self._pick_position)
+                row2.addWidget(btn_pick)
+
+                row2.addStretch()
+                outer.addLayout(row2)
+
+                # Row 3: remark
+                row3 = QHBoxLayout()
+                row3.setSpacing(8)
+
+                remark_label = QLabel("\u5907\u6ce8:")
+                remark_label.setFixedWidth(40)
+                row3.addWidget(remark_label)
+
+                self._remark_edit = QLineEdit()
+                self._remark_edit.setPlaceholderText("\u4e3a\u6b64\u5feb\u6377\u952e\u6dfb\u52a0\u5907\u6ce8\uff0c\u65b9\u4fbf\u8bc6\u522b")
+                self._remark_edit.setText(str(entry.get("remark", "")))
+                self._remark_edit.setStyleSheet(
+                    "QLineEdit { padding: 4px 8px; border: 1px solid #d0d0d0; border-radius: 4px; background: #fff; }"
+                )
+                self._remark_edit.textChanged.connect(self._on_value_changed)
+                row3.addWidget(self._remark_edit, 1)
+
+                outer.addLayout(row3)
 
                 self._overlay: _PositionPickerOverlay | None = None
 
@@ -223,6 +262,7 @@ class HotkeyClickScript(ScriptBase):
                 self.entry["x"] = self._x_spin.value()
                 self.entry["y"] = self._y_spin.value()
                 self.entry["button"] = self._button_combo.currentData()
+                self.entry["remark"] = self._remark_edit.text()
 
             def _pick_position(self) -> None:
                 self._overlay = _PositionPickerOverlay()
@@ -273,7 +313,7 @@ class HotkeyClickScript(ScriptBase):
                     self._add_entry_with_data(entry_data)
 
             def _add_entry(self) -> None:
-                default_entry = {"hotkey": "", "x": 0, "y": 0, "button": "left"}
+                default_entry = {"hotkey": "", "x": 0, "y": 0, "button": "left", "remark": ""}
                 self._add_entry_with_data(default_entry)
 
             def _add_entry_with_data(self, entry_data: dict[str, Any]) -> None:
