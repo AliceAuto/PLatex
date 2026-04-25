@@ -49,6 +49,7 @@ from .config import default_config_path, default_log_path, load_config
 from .history import HistoryStore
 from .loader import load_script_processor
 from .logging_utils import setup_logging
+from .script_registry import default_scripts_dir
 from .tray import TrayController
 from .watcher import ClipboardWatcher
 
@@ -58,21 +59,17 @@ def _default_script_path() -> Path:
 
     candidates: list[Path] = []
     if getattr(sys, "frozen", False):
-        # 1) Beside exe: release/PLatexClient-1.0.0/scripts/glm_vision_ocr.py
         candidates.append(Path(sys.executable).resolve().parent / script_name)
-        # 2) PyInstaller temp extraction dir (when bundled with add-data)
         meipass = getattr(sys, "_MEIPASS", None)
         if meipass:
             candidates.append(Path(meipass) / script_name)
 
-    # 3) Source tree fallback for dev mode
     candidates.append(Path(__file__).resolve().parents[2] / script_name)
 
     for candidate in candidates:
         if candidate.exists():
             return candidate
 
-    # Keep deterministic error path if nothing exists
     return candidates[0]
 
 
@@ -195,7 +192,7 @@ def _tray(args: argparse.Namespace, *, open_panel_on_start: bool = False) -> int
         _signal_existing_instance_panel()
         print("PLatex tray is already running. Activated the existing instance.")
         return 0
-    
+
     try:
         runtime = _resolve_runtime_config(args)
         setup_logging(runtime["log_file"])

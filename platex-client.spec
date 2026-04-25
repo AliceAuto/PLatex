@@ -3,9 +3,12 @@ from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 
-datas = [('scripts/glm_vision_ocr.py', 'scripts')]
+datas = [
+    ('scripts/glm_vision_ocr.py', 'scripts'),
+    ('scripts/hotkey_click.py', 'scripts'),
+]
 binaries = []
-hiddenimports = []
+hiddenimports = ['pynput.keyboard', 'pynput.mouse', 'pynput._util', 'pynput.win32._win32_keyboard', 'pynput.win32._win32_mouse']
 datas += collect_data_files('PyQt6')
 binaries += collect_dynamic_libs('PyQt6')
 hiddenimports += collect_submodules('PyQt6')

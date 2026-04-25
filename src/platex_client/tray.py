@@ -93,6 +93,7 @@ def _load_panel_config(default_script: Path) -> dict[str, Any]:
         "auto_start": bool(payload.get("auto_start", False)),
         "ui_language": str(payload.get("ui_language", "en")),
         "language_pack": str(payload.get("language_pack", "")),
+        "scripts": payload.get("scripts") or {},
     }
 
 
@@ -106,7 +107,6 @@ def _startup_command() -> str:
         return f'"{sys.executable}" tray'
     if sys.platform == "win32":
         exe = Path(sys.executable)
-        # Prefer pythonw.exe in startup to avoid showing a console window.
         if exe.name.lower() == "python.exe":
             pythonw = exe.with_name("pythonw.exe")
             if pythonw.exists():
@@ -167,11 +167,9 @@ def _open_runtime_terminal(script_path: Path, log_path: str | None) -> None:
         safe_log = str(log_file).replace("'", "''")
         ps_lines.extend(
             [
-                f"if (Test-Path -LiteralPath '{safe_log}') {{",
-                "  Write-Host ''",
-                f"  Write-Host 'Tailing log: {safe_log}' -ForegroundColor Green",
-                f"  Get-Content -LiteralPath '{safe_log}' -Tail 50",
-                "}",
+                "Write-Host ''",
+                f"Write-Host 'Tailing log: {safe_log}' -ForegroundColor Green",
+                f"Get-Content -LiteralPath '{safe_log}' -Tail 50",
             ]
         )
 
@@ -215,6 +213,10 @@ class TrayController:
         if active_script.exists():
             self.app.script_path = active_script
 
+        # Load script configs from the panel config
+        if private_cfg.get("scripts"):
+            self.app.registry.load_configs(private_cfg["scripts"])
+
         popup_queue: queue.Queue[tuple[str, str, int] | None] = queue.Queue()
         panel_queue: queue.Queue[str | None] = queue.Queue()
         popup_stop = threading.Event()
@@ -234,6 +236,7 @@ class TrayController:
                     QMessageBox,
                     QPlainTextEdit,
                     QPushButton,
+                    QTabWidget,
                     QVBoxLayout,
                     QWidget,
                 )
@@ -256,7 +259,7 @@ class TrayController:
 
                     if panel_cmd == "open-panel":
                         if panel_window is None or not panel_window.isVisible():
-                            panel_window = _ControlPanel()
+                            panel_window = _ControlPanel(controller_ref=self)
                             panel_window.show()
                         else:
                             panel_window.raise_()
@@ -333,34 +336,25 @@ class TrayController:
             controller = self
 
             class _ControlPanel(QWidget):
-                def __init__(self) -> None:
+                def __init__(self, controller_ref: TrayController) -> None:
                     super().__init__(None)
+                    self._controller = controller_ref
                     self.setWindowTitle("PLatex 控制面板")
                     self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    self.setMinimumSize(640, 520)
+                    self.setMinimumSize(700, 560)
 
                     root = QVBoxLayout(self)
                     root.setContentsMargins(14, 14, 14, 14)
                     root.setSpacing(10)
 
-                    self.auto_start = QCheckBox("开机自启")
-                    root.addWidget(self.auto_start)
+                    self._tab_widget = QTabWidget()
+                    root.addWidget(self._tab_widget)
 
-                    lang_row = QHBoxLayout()
-                    lang_row.addWidget(QLabel("客户端语言"))
-                    self.ui_language = QComboBox()
-                    self.ui_language.addItem("中文（zh-cn）", "zh-cn")
-                    self.ui_language.addItem("English (en)", "en")
-                    lang_row.addWidget(self.ui_language)
-                    root.addLayout(lang_row)
+                    self._general_tab = self._create_general_tab()
+                    self._tab_widget.addTab(self._general_tab, "通用设置")
 
-                    root.addWidget(QLabel("配置文件（完整 YAML，可滚动编辑）"))
-                    self.yaml_editor = QPlainTextEdit()
-                    self.yaml_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-                    self.yaml_editor.setPlainText(self._load_yaml_text())
-                    root.addWidget(self.yaml_editor)
-
-                    self._sync_ui_from_yaml()
+                    self._script_tabs: dict[str, QWidget] = {}
+                    self._create_script_tabs()
 
                     action_row = QHBoxLayout()
                     btn_save = QPushButton("保存并应用")
@@ -374,6 +368,44 @@ class TrayController:
                     btn_save.clicked.connect(self._save_apply)
                     btn_terminal.clicked.connect(self._open_terminal)
                     btn_close.clicked.connect(self.close)
+
+                def _create_general_tab(self) -> QWidget:
+                    tab = QWidget()
+                    layout = QVBoxLayout(tab)
+                    layout.setContentsMargins(8, 8, 8, 8)
+                    layout.setSpacing(10)
+
+                    self.auto_start = QCheckBox("开机自启")
+                    layout.addWidget(self.auto_start)
+
+                    lang_row = QHBoxLayout()
+                    lang_row.addWidget(QLabel("客户端语言"))
+                    self.ui_language = QComboBox()
+                    self.ui_language.addItem("中文（zh-cn）", "zh-cn")
+                    self.ui_language.addItem("English (en)", "en")
+                    lang_row.addWidget(self.ui_language)
+                    layout.addLayout(lang_row)
+
+                    layout.addWidget(QLabel("配置文件（完整 YAML，可滚动编辑）"))
+                    self.yaml_editor = QPlainTextEdit()
+                    self.yaml_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+                    self.yaml_editor.setPlainText(self._load_yaml_text())
+                    layout.addWidget(self.yaml_editor)
+
+                    self._sync_ui_from_yaml()
+                    return tab
+
+                def _create_script_tabs(self) -> None:
+                    registry = controller.app.registry
+                    for entry in registry.get_all_scripts():
+                        script = entry.script
+                        try:
+                            widget = script.create_settings_widget(self._tab_widget)
+                        except Exception:
+                            widget = None
+                        if widget is not None:
+                            self._script_tabs[script.name] = widget
+                            self._tab_widget.addTab(widget, script.display_name)
 
                 def _sync_ui_from_yaml(self) -> None:
                     payload: dict[str, Any] = {}
@@ -399,6 +431,10 @@ class TrayController:
                     seed = dict(private_cfg)
                     seed["script"] = str(controller.app.script_path)
                     seed["auto_start"] = bool(_is_startup_enabled() or seed.get("auto_start", False))
+                    # Include script configs
+                    script_configs = controller.app.registry.save_configs()
+                    if script_configs:
+                        seed["scripts"] = script_configs
                     return yaml.safe_dump(seed, sort_keys=False, allow_unicode=True)
 
                 def _parse_yaml(self) -> dict[str, Any]:
@@ -439,6 +475,31 @@ class TrayController:
                     payload["auto_start"] = auto_start
                     payload["ui_language"] = ui_language
 
+                    # Collect script-specific configs from UI widgets
+                    script_configs: dict[str, dict[str, Any]] = {}
+                    for name, widget in self._script_tabs.items():
+                        save_fn = getattr(widget, "save_settings", None)
+                        if callable(save_fn):
+                            save_fn()
+                    # Get updated configs from scripts
+                    for name, entry in controller.app.registry.entries.items():
+                        script_configs[name] = entry.script.save_config()
+                        script_configs[name]["enabled"] = entry.enabled
+                    if script_configs:
+                        payload["scripts"] = script_configs
+
+                    # Save GLM config from OCR script to top-level
+                    registry = controller.app.registry
+                    ocr_entries = registry.get_ocr_scripts()
+                    for entry in ocr_entries:
+                        ocr_config = entry.script.save_config()
+                        if ocr_config.get("api_key"):
+                            payload["glm_api_key"] = ocr_config["api_key"]
+                        if ocr_config.get("model"):
+                            payload["glm_model"] = ocr_config["model"]
+                        if ocr_config.get("base_url"):
+                            payload["glm_base_url"] = ocr_config["base_url"]
+
                     try:
                         _set_startup_enabled(auto_start)
                     except Exception as exc:  # noqa: BLE001
@@ -462,6 +523,14 @@ class TrayController:
                         os.environ["GLM_MODEL"] = glm_model
                     if isinstance(glm_base_url, str) and glm_base_url:
                         os.environ["GLM_BASE_URL"] = glm_base_url
+
+                    # Apply script configs
+                    scripts_config = payload.get("scripts", {})
+                    if isinstance(scripts_config, dict):
+                        controller.app.registry.load_configs(scripts_config)
+
+                    # Re-register hotkeys
+                    controller.app.apply_registry_hotkeys()
 
                     try:
                         was_running = controller.app._worker is not None and controller.app._worker.is_alive()
@@ -526,7 +595,7 @@ class TrayController:
                     popup.start_auto_fade(timeout_ms)
                     active_popups.append(popup)
 
-                    def _release_popup_ref(_obj=None, *, _popup=popup) -> None:
+                    def _release_popup_ref(_obj=None, *, _popup=popup) -> None:  # noqa: N802
                         try:
                             active_popups.remove(_popup)
                         except ValueError:
@@ -605,7 +674,6 @@ class TrayController:
             _request_shutdown()
             self.app.stop()
             icon.stop()
-            # Fallback: some Windows tray/Qt combinations may keep the process alive.
             if force_exit_timer is None:
                 force_exit_timer = threading.Timer(2.5, lambda: os._exit(0))
                 force_exit_timer.daemon = True
@@ -632,7 +700,6 @@ class TrayController:
         tray_thread.start()
 
         try:
-            # Keep Qt on main thread to avoid Qt6Gui crashes on some Windows setups.
             popup_loop()
         except KeyboardInterrupt:
             logger.info("Tray interrupted by keyboard")
