@@ -32,7 +32,7 @@ jobs:
 
       - name: Build executable
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --noconsole --contents-directory . --name platex-client --icon assets/platex-client.ico --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --add-data "scripts/hotkey_click.py;scripts" --hidden-import pynput.keyboard --hidden-import pynput.mouse --hidden-import pynput._util --hidden-import platex_client --hidden-import platex_client.app --hidden-import platex_client.cli --hidden-import platex_client.clipboard --hidden-import platex_client.config --hidden-import platex_client.config_manager --hidden-import platex_client.history --hidden-import platex_client.hotkey_listener --hidden-import platex_client.loader --hidden-import platex_client.logging_utils --hidden-import platex_client.models --hidden-import platex_client.script_base --hidden-import platex_client.script_registry --hidden-import platex_client.tray --hidden-import platex_client.watcher --hidden-import platex_client.windows_clipboard --collect-submodules PyQt6 --collect-data PyQt6 --collect-binaries PyQt6 launcher.py
+          python -m PyInstaller --noconfirm --clean --onedir --noconsole --contents-directory . --name platex-client --icon assets/platex-client.ico --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --add-data "scripts/hotkey_click.py;scripts" --hidden-import pynput.keyboard --hidden-import pynput.mouse --hidden-import pynput._util --collect-all platex_client --collect-submodules PyQt6 --collect-data PyQt6 --collect-binaries PyQt6 launcher.py
 
       - name: Verify bundled runtime files
         run: |

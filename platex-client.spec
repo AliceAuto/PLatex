@@ -3,12 +3,9 @@ from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_dynamic_libs
 from PyInstaller.utils.hooks import collect_submodules
 
-datas = [
-    ('scripts/glm_vision_ocr.py', 'scripts'),
-    ('scripts/hotkey_click.py', 'scripts'),
-]
+datas = [('scripts/glm_vision_ocr.py', 'scripts'), ('scripts/hotkey_click.py', 'scripts')]
 binaries = []
-hiddenimports = ['pynput.keyboard', 'pynput.mouse', 'pynput._util', 'pynput.win32._win32_keyboard', 'pynput.win32._win32_mouse']
+hiddenimports = ['pynput.keyboard', 'pynput.mouse', 'pynput._util', 'platex_client', 'platex_client.app', 'platex_client.cli', 'platex_client.clipboard', 'platex_client.config', 'platex_client.config_manager', 'platex_client.history', 'platex_client.hotkey_listener', 'platex_client.loader', 'platex_client.logging_utils', 'platex_client.models', 'platex_client.script_base', 'platex_client.script_registry', 'platex_client.tray', 'platex_client.watcher', 'platex_client.windows_clipboard']
 datas += collect_data_files('PyQt6')
 binaries += collect_dynamic_libs('PyQt6')
 hiddenimports += collect_submodules('PyQt6')
@@ -45,6 +42,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets\\platex-client.ico'],
     contents_directory='.',
 )
 coll = COLLECT(

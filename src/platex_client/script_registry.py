@@ -170,10 +170,10 @@ class ScriptRegistry:
         """Collect configs from all scripts and return as {script_name: config_dict}."""
         result: dict[str, dict[str, Any]] = {}
         for name, entry in self._entries.items():
-config = entry.script.save_config()
-        if not isinstance(config, dict):
-            config = {}
-        config["enabled"] = entry.enabled
+            config = entry.script.save_config()
+            if not isinstance(config, dict):
+                config = {}
+            config["enabled"] = entry.enabled
             result[name] = config
         return result
 
