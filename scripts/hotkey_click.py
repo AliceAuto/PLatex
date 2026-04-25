@@ -303,9 +303,7 @@ class HotkeyClickScript(ScriptBase):
                 main_layout.addWidget(scroll)
 
                 btn_add = QPushButton("\u2795 \u6dfb\u52a0\u5feb\u6377\u952e")
-                btn_add.setStyleSheet(
-                    "QPushButton { padding: 8px 16px; font-size: 13px; }"
-                )
+                btn_add.setStyleSheet("QPushButton { padding: 8px 16px; font-size: 13px; }")
                 btn_add.clicked.connect(self._add_entry)
                 main_layout.addWidget(btn_add)
 

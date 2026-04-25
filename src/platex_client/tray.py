@@ -435,7 +435,66 @@ class TrayController:
                             if callable(save_fn):
                                 self._script_tabs[script.name] = widget
 
-                            self._tab_widget.addTab(widget, script.display_name)
+                            container = QWidget()
+                            container_layout = QVBoxLayout(container)
+                            container_layout.setContentsMargins(0, 0, 0, 0)
+                            container_layout.setSpacing(0)
+                            container_layout.addWidget(widget, 1)
+
+                            io_row = QHBoxLayout()
+                            io_row.setContentsMargins(12, 4, 12, 8)
+                            btn_import = QPushButton("\u5bfc\u5165\u914d\u7f6e")
+                            btn_export = QPushButton("\u5bfc\u51fa\u914d\u7f6e")
+                            import_style = "QPushButton { padding: 4px 12px; font-size: 12px; border: 1px solid #aaa; border-radius: 3px; }"
+                            btn_import.setStyleSheet(import_style)
+                            btn_export.setStyleSheet(import_style)
+
+                            def _make_import(s=script, w=widget):
+                                def _do_import():
+                                    try:
+                                        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+                                        filepath, _ = QFileDialog.getOpenFileName(
+                                            self, f"\u5bfc\u5165 {s.display_name} \u914d\u7f6e", str(Path.cwd()),
+                                            "YAML \u6587\u4ef6 (*.yaml *.yml);;\u6240\u6709\u6587\u4ef6 (*)",
+                                        )
+                                        if not filepath:
+                                            return
+                                        s.import_config(Path(filepath))
+                                        load_fn = getattr(w, "load_settings", None)
+                                        if callable(load_fn):
+                                            load_fn()
+                                        QMessageBox.information(self, "\u5bfc\u5165\u6210\u529f", f"{s.display_name} \u914d\u7f6e\u5df2\u5bfc\u5165\u3002")
+                                    except Exception as exc:
+                                        from PyQt6.QtWidgets import QMessageBox
+                                        QMessageBox.warning(self, "\u5bfc\u5165\u5931\u8d25", str(exc))
+                                return _do_import
+
+                            def _make_export(s=script):
+                                def _do_export():
+                                    try:
+                                        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+                                        filepath, _ = QFileDialog.getSaveFileName(
+                                            self, f"\u5bfc\u51fa {s.display_name} \u914d\u7f6e",
+                                            str(Path.cwd() / f"{s.name}-config.yaml"),
+                                            "YAML \u6587\u4ef6 (*.yaml *.yml);;\u6240\u6709\u6587\u4ef6 (*)",
+                                        )
+                                        if not filepath:
+                                            return
+                                        s.export_config(Path(filepath))
+                                        QMessageBox.information(self, "\u5bfc\u51fa\u6210\u529f", f"\u914d\u7f6e\u5df2\u5bfc\u51fa\u5230:\n{filepath}")
+                                    except Exception as exc:
+                                        from PyQt6.QtWidgets import QMessageBox
+                                        QMessageBox.warning(self, "\u5bfc\u51fa\u5931\u8d25", str(exc))
+                                return _do_export
+
+                            btn_import.clicked.connect(_make_import())
+                            btn_export.clicked.connect(_make_export())
+                            io_row.addWidget(btn_import)
+                            io_row.addWidget(btn_export)
+                            io_row.addStretch()
+                            container_layout.addLayout(io_row)
+
+                            self._tab_widget.addTab(container, script.display_name)
 
                 def _change_config_dir(self) -> None:
                     current = get_config_dir()
