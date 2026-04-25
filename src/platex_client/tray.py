@@ -55,15 +55,27 @@ def _build_icon_image():
 
 
 def _panel_config_path() -> Path:
+    # Keep panel settings in the per-user config directory to avoid cwd-dependent loss.
+    preferred = config_file_path()
+    preferred.parent.mkdir(parents=True, exist_ok=True)
+    if preferred.exists():
+        return preferred
+
     cwd = Path.cwd()
-    candidates = [
+    legacy_candidates = [
         cwd / "config.yaml",
         cwd / "config.example.yaml",
-        config_file_path(),
     ]
-    path = next((candidate for candidate in candidates if candidate.exists()), candidates[-1])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
+    legacy = next((candidate for candidate in legacy_candidates if candidate.exists()), None)
+    if legacy is not None:
+        try:
+            preferred.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
+            return preferred
+        except Exception:
+            # Fall back to legacy file if migration fails.
+            return legacy
+
+    return preferred
 
 
 def _load_panel_config(default_script: Path) -> dict[str, Any]:
@@ -99,7 +111,7 @@ def _load_panel_config(default_script: Path) -> dict[str, Any]:
 
 
 def _save_panel_config(payload: dict[str, Any]) -> None:
-    clean = {k: v for k, v in payload.items() if v not in (None, "")}
+    clean = {k: v for k, v in payload.items() if v is not None and v != ""}
     path = _panel_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(clean, sort_keys=False, allow_unicode=True), encoding="utf-8")
@@ -216,8 +228,7 @@ class TrayController:
         if active_script.exists():
             self.app.script_path = active_script
 
-        if private_cfg.get("scripts"):
-            self.app.registry.load_configs(private_cfg["scripts"])
+        startup_script_configs = private_cfg.get("scripts") if isinstance(private_cfg.get("scripts"), dict) else {}
 
         popup_queue: queue.Queue[tuple[str, str, int] | None] = queue.Queue()
         panel_queue: queue.Queue[str | None] = queue.Queue()
@@ -369,9 +380,16 @@ class TrayController:
                     action_row.addWidget(btn_close)
                     root.addLayout(action_row)
 
-                    btn_save.clicked.connect(self._save_apply)
+                    btn_save.clicked.connect(lambda: self._save_apply(show_result_message=True, restart_app=True))
                     btn_terminal.clicked.connect(self._open_terminal)
                     btn_close.clicked.connect(self.close)
+
+                def closeEvent(self, event) -> None:  # noqa: N802
+                    # Keep script UI and global config in sync even if the panel is closed via X.
+                    if self._save_apply(show_result_message=False, restart_app=False):
+                        event.accept()
+                    else:
+                        event.ignore()
 
                 def _create_general_tab(self) -> QWidget:
                     tab = QWidget()
@@ -399,6 +417,39 @@ class TrayController:
                     btn_change_dir.clicked.connect(self._change_config_dir)
                     config_dir_row.addWidget(btn_change_dir)
                     layout.addLayout(config_dir_row)
+
+                    # Hotkey status section
+                    hotkey_status_box = QWidget()
+                    hotkey_status_layout = QVBoxLayout(hotkey_status_box)
+                    hotkey_status_layout.setContentsMargins(10, 10, 10, 10)
+                    hotkey_status_layout.setSpacing(6)
+                    hotkey_status_box.setStyleSheet(
+                        "QWidget { background: #f8f9fa; border: 1px solid #e2e8f0; border-radius: 8px; }"
+                    )
+
+                    hotkey_header = QHBoxLayout()
+                    hotkey_title = QLabel("快捷键状态")
+                    hotkey_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #1f2937; border: none; background: transparent;")
+                    hotkey_header.addWidget(hotkey_title)
+                    btn_refresh_hotkeys = QPushButton("刷新")
+                    btn_refresh_hotkeys.setFixedWidth(60)
+                    btn_refresh_hotkeys.setStyleSheet(
+                        "QPushButton { padding: 4px 8px; font-size: 11px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }"
+                    )
+                    btn_refresh_hotkeys.clicked.connect(self._refresh_hotkey_status)
+                    hotkey_header.addWidget(btn_refresh_hotkeys)
+                    hotkey_header.addStretch()
+                    hotkey_status_layout.addLayout(hotkey_header)
+
+                    self._hotkey_status_label = QLabel("加载中...")
+                    self._hotkey_status_label.setStyleSheet("font-size: 12px; color: #4b5563; border: none; background: transparent;")
+                    self._hotkey_status_label.setWordWrap(True)
+                    hotkey_status_layout.addWidget(self._hotkey_status_label)
+
+                    # Refresh hotkey status when control panel is opened
+                    self._refresh_hotkey_status()
+
+                    layout.addWidget(hotkey_status_box)
 
                     io_row = QHBoxLayout()
                     btn_export_all = QPushButton("导出全部配置")
@@ -431,6 +482,7 @@ class TrayController:
                     self._yaml_toggle_btn.toggled.connect(self._toggle_yaml_editor)
 
                     self._sync_ui_from_yaml()
+                    self._refresh_hotkey_status()
                     return tab
 
                 def _create_script_tabs(self) -> None:
@@ -444,9 +496,20 @@ class TrayController:
                             widget = None
 
                         if widget is not None:
+                            change_cb = getattr(widget, "set_settings_changed_callback", None)
+                            if callable(change_cb):
+                                change_cb(self._persist_script_settings)
+
                             save_fn = getattr(widget, "save_settings", None)
                             if callable(save_fn):
                                 self._script_tabs[script.name] = widget
+
+                            load_fn = getattr(widget, "load_settings", None)
+                            if callable(load_fn):
+                                try:
+                                    load_fn()
+                                except Exception:
+                                    logger.exception("Failed to initialize script settings widget for %s", script.name)
 
                             container = QWidget()
                             container_layout = QVBoxLayout(container)
@@ -508,6 +571,39 @@ class TrayController:
                             container_layout.addLayout(io_row)
 
                             self._tab_widget.addTab(container, script.display_name)
+
+                def _persist_script_settings(self) -> None:
+                    payload = _load_panel_config(controller.app.script_path)
+                    payload["scripts"] = controller.app.registry.save_configs()
+                    text = yaml.safe_dump({k: v for k, v in payload.items() if v is not None and v != ""}, sort_keys=False, allow_unicode=True)
+
+                    cfg_path = _panel_config_path()
+                    current_text = ""
+                    if cfg_path.exists():
+                        try:
+                            current_text = cfg_path.read_text(encoding="utf-8")
+                        except Exception:
+                            current_text = ""
+
+                    if current_text == text:
+                        return
+
+                    try:
+                        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+                        cfg_path.write_text(text, encoding="utf-8")
+                    except Exception as exc:  # noqa: BLE001
+                        logger.exception("Failed to persist script settings: %s", exc)
+                        return
+
+                    if not self.yaml_editor.hasFocus():
+                        self._yaml_text = text
+                        self.yaml_editor.blockSignals(True)
+                        try:
+                            self.yaml_editor.setPlainText(self._hide_api_key(self._yaml_text))
+                        finally:
+                            self.yaml_editor.blockSignals(False)
+
+                    controller.app.apply_registry_hotkeys()
 
                 def _change_config_dir(self) -> None:
                     current = get_config_dir()
@@ -577,6 +673,51 @@ class TrayController:
                     else:
                         self._yaml_toggle_btn.setText("▶ 显示配置文件 (YAML)")
                         self._yaml_container.setVisible(False)
+
+                def _refresh_hotkey_status(self) -> None:
+                    """Update the hotkey status label in the control panel."""
+                    try:
+                        status = controller.app.hotkey_listener.get_status()
+                    except Exception as exc:
+                        self._hotkey_status_label.setText(f"无法获取快捷键状态: {exc}")
+                        return
+
+                    backend = status.get("backend", "none")
+                    registered = status.get("bindings", [])
+                    failed = status.get("failed", {})
+                    running = status.get("running", False)
+
+                    lines: list[str] = []
+
+                    # Backend info
+                    backend_names = {"win32": "Win32 API (推荐)", "pynput": "pynput (备用)", "none": "无"}
+                    backend_str = backend_names.get(backend, backend)
+                    lines.append(f"后端: {backend_str}")
+
+                    # Running status
+                    if running:
+                        lines.append(f"状态: 运行中 | 已注册: {len(registered)} 个")
+                    else:
+                        lines.append("状态: 已停止")
+
+                    # List registered hotkeys
+                    if registered:
+                        lines.append(f"已注册: {', '.join(registered)}")
+                        lines.append("<span style='color: #166534;'>✓ 所有快捷键正常工作</span>")
+                    else:
+                        lines.append("<span style='color: #dc2626;'>⚠ 未注册任何快捷键</span>")
+
+                    # Show failures
+                    if failed:
+                        failed_items = []
+                        for hk, count in failed.items():
+                            failed_items.append(f"{hk} (重试 {count} 次)")
+                        lines.append(f"<span style='color: #dc2626;'>✗ 注册失败 (被其他程序占用): {', '.join(failed_items)}</span>")
+                        lines.append("<span style='color: #666; font-size: 11px;'>💡 解决: 关闭占用快捷键的其他软件后，点击「保存并应用」重试。</span>")
+                    else:
+                        lines.append("<span style='color: #166534;'>无冲突</span>")
+
+                    self._hotkey_status_label.setText("<br>".join(lines))
 
                 @staticmethod
                 def _hide_api_key(yaml_text: str) -> str:
@@ -698,12 +839,21 @@ class TrayController:
                         data["scripts"] = new_scripts
                     return data
 
-                def _save_apply(self) -> None:
+                def _save_apply(self, *, show_result_message: bool = True, restart_app: bool = True) -> bool:
                     try:
                         payload = self._parse_yaml()
                     except Exception as exc:  # noqa: BLE001
                         QMessageBox.warning(self, "YAML 解析失败", str(exc))
-                        return
+                        return False
+
+                    # Always flush current script UI values into runtime state first.
+                    for widget in self._script_tabs.values():
+                        save_fn = getattr(widget, "save_settings", None)
+                        if callable(save_fn):
+                            try:
+                                save_fn()
+                            except Exception:
+                                logger.exception("Failed to flush script settings from UI")
 
                     script_val = payload.get("script")
                     chosen = controller.app.script_path
@@ -711,14 +861,14 @@ class TrayController:
                         chosen = Path(script_val.strip())
                     if not chosen.exists():
                         QMessageBox.warning(self, "路径无效", "YAML 中 script 指向的脚本不存在。")
-                        return
+                        return False
 
                     interval_raw = payload.get("interval", controller.app.interval)
                     try:
                         interval = float(interval_raw)
                     except Exception:  # noqa: BLE001
                         QMessageBox.warning(self, "配置无效", "YAML 中 interval 必须是数字。")
-                        return
+                        return False
 
                     isolate_mode = bool(payload.get("isolate_mode", controller.app.isolate_mode))
                     auto_start = bool(self.auto_start.isChecked())
@@ -727,15 +877,40 @@ class TrayController:
                     payload["auto_start"] = auto_start
                     payload["ui_language"] = ui_language
 
-                    # Collect script-specific configs from UI widgets
-                    for name, widget in self._script_tabs.items():
-                        save_fn = getattr(widget, "save_settings", None)
-                        if callable(save_fn):
-                            save_fn()
                     script_configs: dict[str, dict[str, Any]] = {}
-                    for name, entry in controller.app.registry.entries.items():
-                        script_configs[name] = entry.script.save_config()
-                        script_configs[name]["enabled"] = entry.enabled
+                    if restart_app:
+                        edited_scripts = payload.get("scripts")
+                        if not isinstance(edited_scripts, dict):
+                            edited_scripts = {}
+
+                        # Detect whether scripts section was edited in YAML editor.
+                        baseline_scripts: dict[str, Any] = {}
+                        try:
+                            baseline_loaded = yaml.safe_load(self._yaml_text)
+                            if isinstance(baseline_loaded, dict) and isinstance(baseline_loaded.get("scripts"), dict):
+                                baseline_scripts = baseline_loaded["scripts"]
+                        except Exception:
+                            baseline_scripts = {}
+
+                        yaml_scripts_changed = edited_scripts != baseline_scripts
+                        if yaml_scripts_changed:
+                            # YAML is authoritative when scripts section changed; apply directly to runtime.
+                            controller.app.registry.load_configs(edited_scripts)
+                            for widget in self._script_tabs.values():
+                                load_fn = getattr(widget, "load_settings", None)
+                                if callable(load_fn):
+                                    try:
+                                        load_fn()
+                                    except Exception:
+                                        logger.exception("Failed to refresh script settings widget from YAML")
+                            script_configs = controller.app.registry.save_configs()
+                        else:
+                            # No scripts edits in YAML; use the flushed runtime script state.
+                            script_configs = controller.app.registry.save_configs()
+                    else:
+                        # On close, trust the live script runtime state only.
+                        script_configs = controller.app.registry.save_configs()
+
                     if script_configs:
                         payload["scripts"] = script_configs
 
@@ -755,7 +930,7 @@ class TrayController:
                         _set_startup_enabled(auto_start)
                     except Exception as exc:  # noqa: BLE001
                         QMessageBox.warning(self, "开机自启失败", str(exc))
-                        return
+                        return False
 
                     # Set env vars BEFORE stripping api_key from payload for disk storage
                     glm_api_key = payload.get("glm_api_key")
@@ -777,7 +952,7 @@ class TrayController:
                         cfg_path.write_text(text, encoding="utf-8")
                     except Exception as exc:  # noqa: BLE001
                         QMessageBox.warning(self, "保存失败", str(exc))
-                        return
+                        return False
 
                     # Update editor with masked version
                     self._yaml_text = text
@@ -791,22 +966,29 @@ class TrayController:
                     # Re-register hotkeys
                     controller.app.apply_registry_hotkeys()
 
-                    try:
-                        was_running = controller.app._worker is not None and controller.app._worker.is_alive()
-                        controller.app.stop()
+                    if restart_app:
+                        try:
+                            was_running = controller.app._worker is not None and controller.app._worker.is_alive()
+                            controller.app.stop()
+                            controller.app.script_path = chosen
+                            controller.app.interval = interval
+                            controller.app.isolate_mode = isolate_mode
+                            controller.app._watcher = None
+                            controller.app._stop_event.clear()
+                            if was_running:
+                                controller.app.start()
+                        except Exception as exc:  # noqa: BLE001
+                            QMessageBox.warning(self, "应用失败", str(exc))
+                            return False
+                    else:
                         controller.app.script_path = chosen
                         controller.app.interval = interval
                         controller.app.isolate_mode = isolate_mode
-                        controller.app._watcher = None
-                        controller.app._stop_event.clear()
-                        if was_running:
-                            controller.app.start()
-                    except Exception as exc:  # noqa: BLE001
-                        QMessageBox.warning(self, "应用失败", str(exc))
-                        return
 
                     logger.info("Control panel applied: script=%s auto_start=%s", chosen, auto_start)
-                    QMessageBox.information(self, "已保存", "YAML 配置已保存并应用。")
+                    if show_result_message:
+                        QMessageBox.information(self, "已保存", "YAML 配置已保存并应用。")
+                    return True
 
                 def _open_terminal(self) -> None:
                     payload: dict[str, Any] = {}
@@ -947,6 +1129,14 @@ class TrayController:
         icon = pystray.Icon("PLatexClient", _build_icon_image(), self._limit_title(show_status()), menu)
         self.app.on_ocr_success = notify_success
         self.app.start()
+        if startup_script_configs:
+            try:
+                # Registry entries are created during app.start(); apply persisted script configs afterwards.
+                self.app.registry.load_configs(startup_script_configs)
+                self.app.apply_registry_hotkeys()
+                logger.info("Applied persisted script configs on startup: %d", len(startup_script_configs))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to apply persisted script configs on startup: %s", exc)
 
         def _tray_loop() -> None:
             try:
