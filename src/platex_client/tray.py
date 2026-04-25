@@ -431,28 +431,11 @@ class TrayController:
                             widget = None
 
                         if widget is not None:
-                            per_script_io = QWidget()
-                            per_layout = QVBoxLayout(per_script_io)
-                            per_layout.setContentsMargins(0, 0, 0, 0)
-                            per_layout.setSpacing(6)
-
-                            per_layout.addWidget(widget)
-
-                            script_io_row = QHBoxLayout()
-                            btn_export = QPushButton(f"导出 {script.display_name} 配置")
-                            btn_import = QPushButton(f"导入 {script.display_name} 配置")
-                            btn_export.clicked.connect(lambda checked, sn=script.name: self._export_script_config(sn))
-                            btn_import.clicked.connect(lambda checked, sn=script.name: self._import_script_config(sn))
-                            script_io_row.addWidget(btn_export)
-                            script_io_row.addWidget(btn_import)
-                            script_io_row.addStretch()
-                            per_layout.addLayout(script_io_row)
-
                             save_fn = getattr(widget, "save_settings", None)
                             if callable(save_fn):
                                 self._script_tabs[script.name] = widget
 
-                            self._tab_widget.addTab(per_script_io, script.display_name)
+                            self._tab_widget.addTab(widget, script.display_name)
 
                 def _change_config_dir(self) -> None:
                     current = get_config_dir()
@@ -514,44 +497,6 @@ class TrayController:
                         controller.app.registry.load_configs(scripts)
 
                     QMessageBox.information(self, "导入成功", "配置已导入。请检查后点击「保存并应用」。")
-
-                def _export_script_config(self, script_name: str) -> None:
-                    filepath, _ = QFileDialog.getSaveFileName(
-                        self, f"导出 {script_name} 配置",
-                        str(Path.cwd() / f"{script_name}-config.yaml"),
-                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
-                    )
-                    if not filepath:
-                        return
-                    try:
-                        mgr = ConfigManager(controller.app.registry)
-                        mgr.export_script(script_name, Path(filepath))
-                        QMessageBox.information(self, "导出成功", f"配置已导出到:\n{filepath}")
-                    except Exception as exc:
-                        QMessageBox.warning(self, "导出失败", str(exc))
-
-                def _import_script_config(self, script_name: str) -> None:
-                    filepath, _ = QFileDialog.getOpenFileName(
-                        self, f"导入 {script_name} 配置", str(Path.cwd()),
-                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
-                    )
-                    if not filepath:
-                        return
-                    try:
-                        mgr = ConfigManager(controller.app.registry)
-                        _, config = mgr.import_script(Path(filepath))
-                        entry = controller.app.registry.get(script_name)
-                        if entry:
-                            entry.script.load_config(config)
-                            # Refresh the script's UI widget if possible
-                            widget = self._script_tabs.get(script_name)
-                            if widget is not None:
-                                load_fn = getattr(widget, "load_settings", None)
-                                if callable(load_fn):
-                                    load_fn()
-                        QMessageBox.information(self, "导入成功", f"{script_name} 配置已导入。请点击「保存并应用」。")
-                    except Exception as exc:
-                        QMessageBox.warning(self, "导入失败", str(exc))
 
                 def _sync_ui_from_yaml(self) -> None:
                     payload: dict[str, Any] = {}
