@@ -92,12 +92,12 @@ def convert_hotkey_str(hotkey: str) -> str:
 def _win32_simulate_click(x: int, y: int, button: str = "left") -> bool:
     """Fast Win32 API click: move-click-restore in ~1ms using SendInput.
 
+    Briefly blocks mouse input during the operation to prevent position drift.
     Returns True if successful, False if the API is unavailable.
     """
     if not _IS_WINDOWS or _USER32 is None:
         return False
 
-    MOUSEEVENTF_MOVE = 0x0001
     MOUSEEVENTF_LEFTDOWN = 0x0002
     MOUSEEVENTF_LEFTUP = 0x0004
     MOUSEEVENTF_RIGHTDOWN = 0x0008
@@ -117,31 +117,26 @@ def _win32_simulate_click(x: int, y: int, button: str = "left") -> bool:
     class INPUT(ctypes.Structure):
         _fields_ = [("type", ctypes.c_ulong), ("ii", MOUSEINPUT)]
 
-    # Get screen dimensions for coordinate normalization
-    screen_w = _USER32.GetSystemMetrics(0)  # SM_CXSCREEN
-    screen_h = _USER32.GetSystemMetrics(1)  # SM_CYSCREEN
+    screen_w = _USER32.GetSystemMetrics(0)
+    screen_h = _USER32.GetSystemMetrics(1)
     if screen_w <= 0 or screen_h <= 0:
         return False
 
     try:
-        # Save original cursor position
+        # Block mouse/keyboard input briefly to prevent position drift
+        _USER32.BlockInput(True)
+
         orig = ctypes.wintypes.POINT()
         _USER32.GetCursorPos(ctypes.byref(orig))
         orig_x, orig_y = orig.x, orig.y
 
-        # Move to target
         _USER32.SetCursorPos(x, y)
+        time.sleep(0.005)
 
-        # Small sleep to ensure position is set before click
-        time.sleep(0.008)
-
-        # Build click inputs
         if button == "left":
-            down_flag = MOUSEEVENTF_LEFTDOWN
-            up_flag = MOUSEEVENTF_LEFTUP
+            down_flag, up_flag = MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP
         else:
-            down_flag = MOUSEEVENTF_RIGHTDOWN
-            up_flag = MOUSEEVENTF_RIGHTUP
+            down_flag, up_flag = MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP
 
         extra = ctypes.c_ulong(0)
         down = INPUT(type=INPUT_MOUSE, ii=MOUSEINPUT(
@@ -155,14 +150,18 @@ def _win32_simulate_click(x: int, y: int, button: str = "left") -> bool:
         _USER32.SendInput(1, ctypes.byref(down), ctypes.sizeof(INPUT))
         _USER32.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT))
 
-        # Small delay before restoring position
         time.sleep(0.005)
-
-        # Restore original position
         _USER32.SetCursorPos(orig_x, orig_y)
+
         return True
     except Exception:
         return False
+    finally:
+        # Always unblock input, even on error
+        try:
+            _USER32.BlockInput(False)
+        except Exception:
+            pass
 
 
 class HotkeyListener:
