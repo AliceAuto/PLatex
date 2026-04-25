@@ -64,7 +64,8 @@ class OcrScript(ScriptBase):
     def save_config(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
         if self._api_key:
-            result["api_key"] = self._api_key
+            hint = self._api_key[:4] + "*" * (len(self._api_key) - 4) if len(self._api_key) > 4 else "****"
+            result["api_key_hint"] = hint
         result["model"] = self._model
         result["base_url"] = self._base_url
         return result

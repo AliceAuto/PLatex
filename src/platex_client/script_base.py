@@ -65,6 +65,37 @@ class ScriptBase(ABC):
         """Return script-specific configuration as a dict for persistence."""
         return {}
 
+    def import_config(self, path: Any) -> dict[str, Any]:
+        """Import configuration from a file path. Returns the loaded config dict.
+
+        Default implementation loads YAML. Scripts can override for custom formats.
+        """
+        import yaml
+        from pathlib import Path
+        p = Path(path) if not isinstance(path, Path) else path
+        if not p.exists():
+            raise FileNotFoundError(f"Config file not found: {p}")
+        loaded = yaml.safe_load(p.read_text(encoding="utf-8"))
+        if loaded is None:
+            return {}
+        if not isinstance(loaded, dict):
+            raise ValueError("Config file must contain a YAML mapping.")
+        self.load_config(loaded)
+        return loaded
+
+    def export_config(self, path: Any) -> None:
+        """Export configuration to a file path.
+
+        Default implementation saves as YAML. Scripts can override for custom formats.
+        """
+        import yaml
+        from pathlib import Path
+        p = Path(path) if not isinstance(path, Path) else path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        config = self.save_config()
+        config["__script_name__"] = self.name
+        p.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True, default_flow_style=False), encoding="utf-8")
+
     def has_ocr_capability(self) -> bool:
         """Whether this script can process clipboard images (OCR)."""
         return False

@@ -46,6 +46,7 @@ if __package__ in {None, ""}:
 from .app import PlatexApp
 from .clipboard import copy_text_to_clipboard
 from .config import default_config_path, default_log_path, load_config
+from .config_manager import db_file_path, log_file_path
 from .history import HistoryStore
 from .loader import load_script_processor
 from .logging_utils import setup_logging

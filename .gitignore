@@ -10,3 +10,21 @@ __pycache__/
 # Local build outputs
 build/
 dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config (may contain API keys)
+config.yaml

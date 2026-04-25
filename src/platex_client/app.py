@@ -97,19 +97,29 @@ class PlatexApp:
 
     def _start_hotkeys(self) -> None:
         for entry in self.registry.get_hotkey_scripts():
-            bindings = entry.script.get_hotkey_bindings()
+            try:
+                bindings = entry.script.get_hotkey_bindings()
+            except Exception as exc:  # noqa: BLE001
+                self.logger.exception("Failed to get hotkey bindings from %s: %s", entry.script.name, exc)
+                continue
             for hotkey, action in bindings.items():
                 script_ref = entry.script
 
                 def _make_cb(s: object, a: str) -> Callable[[], None]:
                     def _cb() -> None:
-                        s.on_hotkey(a)
+                        try:
+                            s.on_hotkey(a)  # type: ignore[attr-defined]
+                        except Exception:  # noqa: BLE001
+                            logger.exception("Error in hotkey callback for %s", a)
                     return _cb
 
                 self.hotkey_listener.register(hotkey, _make_cb(script_ref, action))
                 self.logger.info("Registered hotkey: %s -> %s.%s", hotkey, entry.script.name, action)
 
-        self.hotkey_listener.start()
+        try:
+            self.hotkey_listener.start()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.exception("Failed to start hotkey listener: %s", exc)
 
     def run_once(self):
         watcher = self._ensure_watcher()

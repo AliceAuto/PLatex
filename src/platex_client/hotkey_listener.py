@@ -136,7 +136,7 @@ class HotkeyListener:
         """Stop the current listener and create a new one with current bindings."""
         self._stop_listener()
 
-        if not _PYNPUT_AVAILABLE or not self._bindings:
+        if not _PYNPUT_AVAILABLE or not self._bindings or not self._running:
             return
 
         wrapped_bindings: dict[str, Callable[[], None]] = {}
@@ -145,7 +145,10 @@ class HotkeyListener:
             def _make_callback(callback: Callable[[], None]) -> Callable[[], None]:
                 def _wrapped() -> None:
                     if not self._suspended:
-                        callback()
+                        try:
+                            callback()
+                        except Exception:  # noqa: BLE001
+                            logger.exception("Error in hotkey callback")
                 return _wrapped
 
             wrapped_bindings[pynput_key] = _make_callback(cb)
@@ -153,7 +156,7 @@ class HotkeyListener:
         try:
             self._listener = _pynput_keyboard.GlobalHotKeys(wrapped_bindings)
             self._listener.start()
-            logger.debug("Hotkey listener rebuilt with %d bindings", len(wrapped_bindings))
+            logger.info("Hotkey listener started with %d bindings", len(wrapped_bindings))
         except Exception as exc:
             logger.error("Failed to start hotkey listener: %s", exc)
             self._listener = None
@@ -173,10 +176,13 @@ def simulate_click(x: int, y: int, button: str = "left") -> None:
         logger.error("pynput not available; cannot simulate click")
         return
 
-    mouse = _MouseController()
-    original_pos = mouse.position
-    btn = _MouseButton.left if button == "left" else _MouseButton.right
-    mouse.position = (x, y)
-    mouse.click(btn)
-    mouse.position = original_pos
-    logger.debug("Simulated %s click at (%d, %d), restored to %s", button, x, y, original_pos)
+    try:
+        mouse = _MouseController()
+        original_pos = mouse.position
+        btn = _MouseButton.left if button == "left" else _MouseButton.right
+        mouse.position = (x, y)
+        mouse.click(btn)
+        mouse.position = original_pos
+        logger.info("Simulated %s click at (%d, %d), restored to %s", button, x, y, original_pos)
+    except Exception:  # noqa: BLE001
+        logger.exception("Failed to simulate click at (%d, %d)", x, y)
