@@ -2,12 +2,24 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
+from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from platex_client.script_base import ScriptBase
+
+logger = logging.getLogger("platex.scripts.ocr")
+
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+
+_VISION_MODELS = {
+    "glm-4v", "glm-4v-plus", "glm-4v-flash",
+    "glm-4.1v", "glm-4.1v-thinking", "glm-4.1v-thinking-flash",
+    "glm-4.1v-flash", "glm-4.1v-plus",
+}
 
 
 def _extract_latex(content: object) -> str:
@@ -70,6 +82,42 @@ class OcrScript(ScriptBase):
         result["base_url"] = self._base_url
         return result
 
+    def _is_vision_model(self, model: str) -> bool:
+        model_lower = model.lower().strip()
+        for vm in _VISION_MODELS:
+            if model_lower.startswith(vm):
+                return True
+        if any(kw in model_lower for kw in ("v-plus", "v-flash", "vision", "4v", "4.1v")):
+            return True
+        return False
+
+    def _resize_image(self, image_bytes: bytes, max_pixels: int = 2048) -> tuple[bytes, str]:
+        """Resize image if too large. Returns (image_bytes, format)."""
+        try:
+            from PIL import Image
+
+            img = Image.open(BytesIO(image_bytes))
+            fmt = img.format or "PNG"
+            if fmt.upper() == "JPEG":
+                fmt = "JPEG"
+            else:
+                fmt = "PNG"
+            w, h = img.size
+            if w <= max_pixels and h <= max_pixels and len(image_bytes) <= _MAX_IMAGE_BYTES:
+                return image_bytes, fmt
+            img.thumbnail((max_pixels, max_pixels))
+            buf = BytesIO()
+            save_fmt = "JPEG" if fmt == "JPEG" else "PNG"
+            kwargs = {"format": save_fmt}
+            if save_fmt == "JPEG":
+                kwargs["quality"] = 85
+            else:
+                kwargs["optimize"] = True
+            img.save(buf, **kwargs)
+            return buf.getvalue(), save_fmt
+        except Exception:
+            return image_bytes, "PNG"
+
     def process_image(self, image_bytes: bytes, context: dict[str, object] | None = None) -> str:
         api_key = self._api_key or os.getenv("GLM_API_KEY")
         if not api_key:
@@ -78,7 +126,10 @@ class OcrScript(ScriptBase):
         model = self._model
         base_url = self._base_url
 
+        image_bytes, img_fmt = self._resize_image(image_bytes)
         image_base64 = base64.b64encode(image_bytes).decode("ascii")
+        mime = "image/jpeg" if img_fmt == "JPEG" else "image/png"
+
         prompt = (
             "Read the image content and respond according to these rules:\n"
             "1. If the image contains mathematical formulas or equations:\n"
@@ -99,7 +150,7 @@ class OcrScript(ScriptBase):
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_base64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_base64}"}},
                     ],
                 }
             ],
@@ -116,6 +167,12 @@ class OcrScript(ScriptBase):
                 response_body = response.read().decode("utf-8", errors="replace")
         except HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
+            if exc.code == 400 and "does not support image" in error_body:
+                raise RuntimeError(
+                    f"Model '{model}' does not support image input. "
+                    f"Please switch to a vision model (e.g. glm-4.1v-thinking-flash) "
+                    f"in the OCR settings tab."
+                ) from exc
             raise RuntimeError(f"GLM HTTP error {exc.code}: {error_body}") from exc
         except URLError as exc:
             raise RuntimeError(f"GLM request failed: {exc.reason}") from exc
@@ -128,6 +185,13 @@ class OcrScript(ScriptBase):
             raise RuntimeError(f"GLM returned invalid JSON (first 200 chars: {response_body[:200]}): {exc}") from exc
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
+            error_msg = str(data.get("error", data.get("message", "")))
+            if "does not support image" in error_msg or "not support" in error_msg.lower() and "image" in error_msg.lower():
+                raise RuntimeError(
+                    f"Model '{model}' does not support image input. "
+                    f"Please switch to a vision model (e.g. glm-4.1v-thinking-flash) "
+                    f"in the OCR settings tab."
+                )
             raise RuntimeError(f"GLM returned invalid response: {json.dumps(data, ensure_ascii=False)}")
 
         message = choices[0].get("message", {})
@@ -176,6 +240,13 @@ class OcrScript(ScriptBase):
                 self._model_edit.setText(script_ref._model)
                 layout.addWidget(self._model_edit)
 
+                self._model_warning = QLabel("")
+                self._model_warning.setStyleSheet("color: #cc3333; font-size: 12px;")
+                self._model_warning.setWordWrap(True)
+                layout.addWidget(self._model_warning)
+                self._model_edit.textChanged.connect(self._check_model)
+                self._check_model()
+
                 # Base URL
                 layout.addWidget(QLabel("Base URL:"))
                 self._base_url_edit = QLineEdit()
@@ -183,6 +254,16 @@ class OcrScript(ScriptBase):
                 layout.addWidget(self._base_url_edit)
 
                 layout.addStretch()
+
+            def _check_model(self) -> None:
+                model = self._model_edit.text().strip()
+                if model and not script_ref._is_vision_model(model):
+                    self._model_warning.setText(
+                        "\u26a0 \u5f53\u524d\u6a21\u578b\u4e0d\u652f\u6301\u56fe\u7247\u8f93\u5165\uff0cOCR \u5c06\u5931\u8d25\u3002"
+                        "\u8bf7\u4f7f\u7528\u89c6\u89c9\u6a21\u578b\uff08\u5982 glm-4.1v-thinking-flash\uff09\u3002"
+                    )
+                else:
+                    self._model_warning.setText("")
 
             def save_settings(self) -> None:
                 script_ref._api_key = self._api_key_edit.text().strip() or None
