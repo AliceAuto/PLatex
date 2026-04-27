@@ -33,6 +33,28 @@ def _install_global_excepthook() -> None:
     sys.excepthook = _hook
 
 
+def _sanitize_argv(argv: list[str]) -> list[str]:
+    sensitive_flags = {"--config", "--db-path", "--script", "--log-file"}
+    redacted: list[str] = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            redacted.append("***REDACTED***")
+            skip_next = False
+            continue
+        if arg in sensitive_flags:
+            redacted.append(arg)
+            skip_next = True
+            continue
+        if "=" in arg:
+            prefix, _, _ = arg.partition("=")
+            if prefix in sensitive_flags:
+                redacted.append(f"{prefix}=***REDACTED***")
+                continue
+        redacted.append(arg)
+    return redacted
+
+
 def _run() -> int:
     _install_global_excepthook()
     _append_startup_log(
@@ -41,7 +63,7 @@ def _run() -> int:
         f"frozen={getattr(sys, 'frozen', False)} "
         f"exe={sys.executable} "
         f"cwd={os.getcwd()} "
-        f"argv={sys.argv}"
+        f"argv={_sanitize_argv(sys.argv)}"
     )
 
     try:

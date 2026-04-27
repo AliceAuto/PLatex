@@ -1,24 +1,73 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
+from rich.logging import RichHandler
 
-def setup_logging(log_file: Path) -> None:
+_SENSITIVE_PATTERNS = [
+    (re.compile(r'(api[_-]?key\s*[:=]\s*)\S+', re.IGNORECASE), r'\1***'),
+    (re.compile(r'(token\s*[:=]\s*)\S+', re.IGNORECASE), r'\1***'),
+    (re.compile(r'(secret\s*[:=]\s*)\S+', re.IGNORECASE), r'\1***'),
+    (re.compile(r'(password\s*[:=]\s*)\S+', re.IGNORECASE), r'\1***'),
+]
+
+
+class _SensitiveDataFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            for pattern, replacement in _SENSITIVE_PATTERNS:
+                record.msg = pattern.sub(replacement, record.msg)
+        if record.args and isinstance(record.args, tuple):
+            record.args = tuple(
+                pattern.sub(replacement, arg) if isinstance(arg, str) else arg
+                for arg in record.args
+                for pattern, replacement in _SENSITIVE_PATTERNS
+            )
+        return True
+
+
+def setup_logging(log_file: Path, *, level: int = logging.INFO) -> None:
     log_file.parent.mkdir(parents=True, exist_ok=True)
 
     root_logger = logging.getLogger()
-    if root_logger.handlers:
-        return
 
-    root_logger.setLevel(logging.INFO)
+    file_formatter = logging.Formatter(
+        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
-    formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    existing_file_handler = None
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            existing_file_handler = handler
+            break
+
+    if existing_file_handler is not None:
+        try:
+            current_path = Path(existing_file_handler.baseFilename).resolve()
+        except Exception:
+            current_path = None
+        if current_path == log_file.resolve():
+            existing_file_handler.setFormatter(file_formatter)
+            return
+        root_logger.removeHandler(existing_file_handler)
+        existing_file_handler.close()
+
+    if not root_logger.handlers:
+        root_logger.setLevel(level)
+        root_logger.addFilter(_SensitiveDataFilter())
+
+        console_handler = RichHandler(
+            show_time=True,
+            show_path=False,
+            markup=True,
+            rich_tracebacks=True,
+            tracebacks_show_locals=False,
+        )
+        root_logger.addHandler(console_handler)
 
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setFormatter(formatter)
+    file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
-
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)

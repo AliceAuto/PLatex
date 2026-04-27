@@ -14,22 +14,25 @@ class HistoryStoreTests(unittest.TestCase):
     def test_add_and_latest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             store = HistoryStore(Path(temp_dir) / "history.sqlite3")
-            event = ClipboardEvent(
-                created_at=datetime.now(timezone.utc),
-                image_hash="abc123",
-                image_width=120,
-                image_height=80,
-                latex=r"x^2+y^2=z^2",
-                source="test-script",
-                status="ok",
-                error=None,
-            )
-            store.add(event)
+            try:
+                event = ClipboardEvent(
+                    created_at=datetime.now(timezone.utc),
+                    image_hash="abc123",
+                    image_width=120,
+                    image_height=80,
+                    latex=r"x^2+y^2=z^2",
+                    source="test-script",
+                    status="ok",
+                    error=None,
+                )
+                store.add(event)
 
-            latest = store.latest()
-            self.assertIsNotNone(latest)
-            self.assertEqual(latest.image_hash, "abc123")
-            self.assertEqual(latest.latex, r"x^2+y^2=z^2")
+                latest = store.latest()
+                self.assertIsNotNone(latest)
+                self.assertEqual(latest.image_hash, "abc123")
+                self.assertEqual(latest.latex, r"x^2+y^2=z^2")
+            finally:
+                store.close()
 
 
 class LoaderTests(unittest.TestCase):

@@ -1,54 +1,37 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import ctypes
 import logging
 import threading
 import time
 
-logger = logging.getLogger("platex.clipboard")
+from .platform_utils import IS_WINDOWS, KERNEL32, USER32
 
+logger = logging.getLogger("platex.clipboard")
 
 _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE = 0x0002
 
 _MAX_CLIPBOARD_ATTEMPTS = 20
 _CLIPBOARD_RETRY_DELAY_SECONDS = 0.08
+_MAX_VERIFY_ATTEMPTS = 5
+_CLIPBOARD_TOTAL_TIMEOUT = 10.0
 
-_user32 = ctypes.windll.user32
-_kernel32 = ctypes.windll.kernel32
 _clipboard_lock = threading.Lock()
-
-_user32.OpenClipboard.argtypes = [ctypes.c_void_p]
-_user32.OpenClipboard.restype = ctypes.c_bool
-_user32.CloseClipboard.argtypes = []
-_user32.CloseClipboard.restype = ctypes.c_bool
-_user32.EmptyClipboard.argtypes = []
-_user32.EmptyClipboard.restype = ctypes.c_bool
-_user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-_user32.SetClipboardData.restype = ctypes.c_void_p
-_user32.GetClipboardData.argtypes = [ctypes.c_uint]
-_user32.GetClipboardData.restype = ctypes.c_void_p
-
-_kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-_kernel32.GlobalAlloc.restype = ctypes.c_void_p
-_kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-_kernel32.GlobalLock.restype = ctypes.c_void_p
-_kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-_kernel32.GlobalUnlock.restype = ctypes.c_bool
-_kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
-_kernel32.GlobalFree.restype = ctypes.c_void_p
 
 
 @contextmanager
 def _open_clipboard():
+    if USER32 is None:
+        raise RuntimeError("Clipboard API not available on this platform")
+
     last_error: Exception | None = None
     for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
-        if _user32.OpenClipboard(None):
+        if USER32.OpenClipboard(None):
             try:
                 yield
             finally:
-                _user32.CloseClipboard()
+                USER32.CloseClipboard()
             return
 
         last_error = RuntimeError("Unable to open Windows clipboard")
@@ -63,60 +46,80 @@ def _open_clipboard():
 
 
 def _allocate_global_memory(data: bytes) -> int:
-    handle = _kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+    if KERNEL32 is None:
+        raise RuntimeError("Clipboard API not available on this platform")
+
+    handle = KERNEL32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
     if not handle:
         raise RuntimeError("Unable to allocate clipboard memory")
 
-    pointer = _kernel32.GlobalLock(handle)
+    pointer = KERNEL32.GlobalLock(handle)
     if not pointer:
-        _kernel32.GlobalFree(handle)
+        KERNEL32.GlobalFree(handle)
         raise RuntimeError("Unable to lock clipboard memory")
 
     try:
+        import ctypes
         ctypes.memmove(pointer, data, len(data))
     finally:
-        _kernel32.GlobalUnlock(handle)
+        KERNEL32.GlobalUnlock(handle)
 
     return handle
 
 
 def _set_text_ctypes(text: str) -> None:
+    import ctypes
+
     encoded = text.encode("utf-16-le") + b"\x00\x00"
     handle = _allocate_global_memory(encoded)
+    ownership_transferred = False
 
-    with _clipboard_lock:
-        with _open_clipboard():
-            _user32.EmptyClipboard()
-            if not _user32.SetClipboardData(_CF_UNICODETEXT, handle):
-                _kernel32.GlobalFree(handle)
-                raise RuntimeError("Unable to write text to Windows clipboard")
+    try:
+        with _clipboard_lock:
+            with _open_clipboard():
+                USER32.EmptyClipboard()
+                if not USER32.SetClipboardData(_CF_UNICODETEXT, handle):
+                    KERNEL32.GlobalFree(handle)
+                    raise RuntimeError("Unable to write text to Windows clipboard")
+                ownership_transferred = True
+    except Exception:
+        if not ownership_transferred:
+            KERNEL32.GlobalFree(handle)
+        raise
 
 
 def _read_text_ctypes() -> str:
+    import ctypes
+
     with _clipboard_lock:
         with _open_clipboard():
-            handle = _user32.GetClipboardData(_CF_UNICODETEXT)
+            handle = USER32.GetClipboardData(_CF_UNICODETEXT)
             if not handle:
                 raise RuntimeError("Unable to read text from Windows clipboard")
 
-            pointer = _kernel32.GlobalLock(handle)
+            pointer = KERNEL32.GlobalLock(handle)
             if not pointer:
                 raise RuntimeError("Unable to lock Windows clipboard text")
 
             try:
                 return ctypes.wstring_at(pointer)
             finally:
-                _kernel32.GlobalUnlock(handle)
+                KERNEL32.GlobalUnlock(handle)
 
 
 def _set_text_with_retry(text: str) -> None:
     last_error: Exception | None = None
+    deadline = time.monotonic() + _CLIPBOARD_TOTAL_TIMEOUT
 
     for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+        if time.monotonic() >= deadline:
+            break
         try:
             _set_text_ctypes(text)
             verify_error: Exception | None = None
-            for verify_attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+            for verify_attempt in range(1, _MAX_VERIFY_ATTEMPTS + 1):
+                if time.monotonic() >= deadline:
+                    break
                 try:
                     time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * verify_attempt)
                     if _read_text_ctypes() == text:
@@ -139,6 +142,8 @@ def _set_text_with_retry(text: str) -> None:
 
 
 def set_text(text: str) -> None:
+    if not IS_WINDOWS or USER32 is None:
+        raise RuntimeError("Clipboard API not available on this platform")
     try:
         _set_text_with_retry(text)
     except Exception as exc:
@@ -147,6 +152,8 @@ def set_text(text: str) -> None:
 
 
 def get_text() -> str | None:
+    if not IS_WINDOWS or USER32 is None:
+        return None
     try:
         return _read_text_ctypes()
     except Exception:

@@ -1,0 +1,109 @@
+window_title: "PLatex 控制面板"
+
+tab_general: "通用设置"
+tab_log: 日志
+
+btn_save: "保存并应用"
+btn_terminal: "打开终端"
+btn_close: 关闭
+btn_change: 更改
+btn_refresh: 刷新
+btn_export_all: "导出全部配置"
+btn_import_all: "导入全部配置"
+btn_export_config: "导出配置"
+btn_import_config: "导入配置"
+
+label_auto_start: "开机自启"
+label_language: "客户端语言"
+label_config_dir: "配置目录"
+label_display: 显示
+label_hotkey_status: "快捷键状态"
+
+msg_loading: "加载中..."
+msg_hotkey_cannot_get: "无法获取快捷键状态: {error}"
+msg_backend: "后端: {backend}"
+msg_running: "状态: 运行中 | 已注册: {count} 个"
+msg_stopped: "状态: 已停止"
+msg_registered: "已注册: {bindings}"
+msg_all_hotkeys_ok: "<span style='color: #8cc490;'>✓ 所有快捷键正常工作</span>"
+msg_no_hotkeys: "<span style='color: #d4787e;'>⚠ 未注册任何快捷键</span>"
+msg_register_failed: "<span style='color: #d4787e;'>✗ 注册失败 (被其他程序占用): {items}</span>"
+msg_resolve_tip: "<span style='color: #8a90a8; font-size: 11px;'>💡 解决: 关闭占用快捷键的其他软件后，点击「保存并应用」重试。</span>"
+msg_no_conflict: "<span style='color: #8cc490;'>无冲突</span>"
+
+backend_win32: "Win32 API (推荐)"
+backend_pynput: "pynput (备用)"
+backend_none: 无
+
+dialog_select_config_dir: "选择配置目录"
+dialog_export_config: "导出全部配置"
+dialog_import_config: "导入全部配置"
+dialog_export_script: "导出 {name} 配置"
+dialog_import_script: "导入 {name} 配置"
+dialog_yaml_filter: "YAML 文件 (*.yaml *.yml);;所有文件 (*)"
+
+msg_config_dir_changed: "配置目录已更改"
+msg_config_dir_changed_text: "配置目录已设置为:\n{path}\n\n如需迁移已有配置，请手动复制旧目录中的文件到新目录。\n重启后生效。"
+msg_change_failed: "更改失败"
+msg_export_success: "导出成功"
+msg_export_success_text: "配置已导出到:\n{path}"
+msg_export_failed: "导出失败"
+msg_import_success: "导入成功"
+msg_import_success_text: "配置已导入。请检查后点击「保存并应用」。"
+msg_import_failed: "导入失败"
+msg_script_import_success: "导入成功"
+msg_script_import_success_text: "{name} 配置已导入。"
+msg_script_import_failed: "导入失败"
+msg_script_export_success: "导出成功"
+msg_script_export_success_text: "配置已导出到:\n{path}"
+msg_script_export_failed: "导出失败"
+
+btn_show_yaml: "▶ 显示配置文件 (YAML)"
+btn_hide_yaml: "▼ 隐藏配置文件 (YAML)"
+
+yaml_parse_error: "YAML 顶层必须是对象（key: value）。"
+yaml_parse_failed: "YAML 解析失败"
+msg_invalid_path: "路径无效"
+msg_invalid_path_text: "YAML 中 script 指向的脚本不存在。"
+msg_invalid_config: "配置无效"
+msg_invalid_interval: "YAML 中 interval 必须是数字。"
+msg_auto_start_failed: "开机自启失败"
+msg_save_failed: "保存失败"
+msg_apply_failed: "应用失败"
+msg_saved: 已保存
+msg_saved_text: "YAML 配置已保存并应用。"
+
+log_auto_refresh: "自动刷新"
+log_open_terminal: "打开终端"
+log_file_not_found: "日志文件不存在: {path}"
+log_read_error: "读取日志失败: {error}"
+
+line_50: "50 行"
+line_100: "100 行"
+line_200: "200 行"
+line_500: "500 行"
+
+tray_control_panel: "控制面板"
+tray_start_stop_watcher: "启动/停止监听"
+tray_isolate_mode: "隔离模式"
+tray_ocr_once: "立即执行 OCR"
+tray_refresh_status: "刷新状态"
+tray_open_terminal: "打开运行终端"
+tray_open_config_folder: "打开配置目录"
+tray_startup_windows: "开机自启动"
+tray_about: "关于 PLatex"
+tray_exit: 退出
+
+tray_popup_click_to_copy: "\n\n点击此弹窗后写入剪贴板。"
+tray_ocr_completed: "OCR 已完成"
+
+tray_about_title: "PLatex 客户端 v{version}"
+tray_about_message: "版本: {version}\n模式: {mode}\n脚本: {script}\n间隔: {interval}s\n\nPLatex - LaTeX OCR 剪贴板工具"
+tray_mode_watching: 监听模式
+tray_mode_isolated: 隔离模式
+
+tray_status_waiting: "PLatex 客户端 | {mode} | 等待剪贴板图片"
+tray_status_latest: "PLatex 客户端 | {mode} | 最近 {hash}"
+tray_status_error: "PLatex 客户端 | {mode} | 上次错误 {error}"
+
+tray_ocr_success_title: "PLatex OCR 成功"

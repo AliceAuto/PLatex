@@ -1,10 +1,19 @@
-name: Build PLatex
+name: Build & Release
 
 on:
   push:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      prerelease:
+        description: 'Mark as pre-release'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
 
 permissions:
   contents: write
@@ -18,50 +27,162 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install build tools
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install pyinstaller
           python -m pip install -e .
 
+      - name: Extract version
+        id: version
+        shell: pwsh
+        run: |
+          $version = python -c "from platex_client import __version__; print(__version__)"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to extract version" }
+          $version = $version.Trim()
+          "app_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Version: $version"
+
       - name: Install Inno Setup
         run: |
           choco install innosetup --version="${env:INNO_SETUP_VERSION}" -y --no-progress
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /?
 
-      - name: Build executable
+      - name: Build with PyInstaller
         run: |
-          python -m PyInstaller --noconfirm --clean --onedir --noconsole --contents-directory . --name platex-client --icon assets/platex-client.ico --paths src --add-data "scripts/glm_vision_ocr.py;scripts" --add-data "scripts/hotkey_click.py;scripts" --hidden-import pynput.keyboard --hidden-import pynput.mouse --hidden-import pynput._util --collect-all platex_client --collect-submodules PyQt6 --collect-data PyQt6 --collect-binaries PyQt6 launcher.py
+          python -m PyInstaller --noconfirm --clean platex-client.spec
 
-      - name: Verify bundled runtime files
+      - name: Verify build output
+        shell: pwsh
         run: |
-          if (!(Test-Path "dist/platex-client/platex-client.exe")) { throw "Missing dist/platex-client/platex-client.exe" }
+          $exePath = "dist/platex-client/platex-client.exe"
+          if (!(Test-Path $exePath)) { throw "Missing $exePath" }
+          Write-Host "OK: platex-client.exe found"
+
           foreach ($script in @("glm_vision_ocr.py", "hotkey_click.py")) {
-            $scriptPath = "dist/platex-client/scripts/$script"
-            if (!(Test-Path $scriptPath)) {
-              $fallbackScriptPath = "dist/platex-client/_internal/scripts/$script"
-              if (!(Test-Path $fallbackScriptPath)) { throw "Missing bundled script file: $script" }
+            $found = $false
+            foreach ($base in @("dist/platex-client", "dist/platex-client/_internal")) {
+              $candidate = Join-Path $base "scripts/$script"
+              if (Test-Path $candidate) {
+                Write-Host "OK: $script found at $candidate"
+                $found = $true
+                break
+              }
             }
+            if (!$found) { throw "Missing bundled script: $script" }
           }
 
+          foreach ($locale in @("en.yaml", "zh-cn.yaml")) {
+            $found = $false
+            foreach ($base in @("dist/platex-client", "dist/platex-client/_internal")) {
+              $candidate = Join-Path $base "platex_client/locales/$locale"
+              if (Test-Path $candidate) {
+                Write-Host "OK: locale $locale found at $candidate"
+                $found = $true
+                break
+              }
+            }
+            if (!$found) { throw "Missing bundled locale: $locale" }
+          }
+
+          foreach ($asset in @("platex-client.png", "platex-client.ico")) {
+            $found = $false
+            foreach ($base in @("dist/platex-client", "dist/platex-client/_internal")) {
+              $candidate = Join-Path $base "assets/$asset"
+              if (Test-Path $candidate) {
+                Write-Host "OK: asset $asset found at $candidate"
+                $found = $true
+                break
+              }
+            }
+            if (!$found) { throw "Missing bundled asset: $asset" }
+          }
+
+          $pyQt6Dir = "dist/platex-client/_internal/PyQt6"
+          if (!(Test-Path $pyQt6Dir)) {
+            $pyQt6Dir = "dist/platex-client/PyQt6"
+            if (!(Test-Path $pyQt6Dir)) {
+              Write-Host "WARNING: PyQt6 directory not found in expected locations"
+            }
+          }
+          if (Test-Path $pyQt6Dir) { Write-Host "OK: PyQt6 found at $pyQt6Dir" }
+
       - name: Build Inno Setup installer
-        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" platex-client.iss'
+        shell: pwsh
+        run: |
+          $iscc = $null
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+            "${env:LOCALAPPDATA}\Programs\Inno Setup 6\ISCC.exe"
+          )
+          foreach ($path in $candidates) {
+            if (Test-Path $path) {
+              $iscc = $path
+              Write-Host "Found ISCC: $path"
+              break
+            }
+          }
+          if (!$iscc) { throw "ISCC.exe not found in any expected location" }
+          & $iscc /DMyAppVersion="${{ steps.version.outputs.app_version }}" platex-client.iss
+
+      - name: Verify installer
+        shell: pwsh
+        run: |
+          $installerPattern = "dist/installer/PLatexClient-*-win64-setup.exe"
+          $installers = Get-ChildItem -Path $installerPattern
+          if ($installers.Count -eq 0) { throw "No installer found matching $installerPattern" }
+          foreach ($inst in $installers) {
+            Write-Host "OK: Installer found - $($inst.Name) ($([math]::Round($inst.Length / 1MB, 2)) MB)"
+          }
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: platex-client-windows-build
-          path: |
-            dist/installer/*.exe
+          path: dist/installer/*.exe
+
+      - name: Determine release tag
+        id: release
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+            "tag_name=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "prerelease=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          } else {
+            git fetch --tags origin
+            $tags = git tag -l "v*"
+            $versions = @()
+            foreach ($tag in $tags) {
+              if ($tag -match '^v(\d+\.\d+\.\d+)$') {
+                try { $versions += [version]$Matches[1] } catch {}
+              }
+            }
+            if ($versions.Count -eq 0) {
+              $next = [version]'1.0.0'
+            } else {
+              $current = $versions | Sort-Object -Descending | Select-Object -First 1
+              $next = [version]::new($current.Major, $current.Minor, $current.Build + 1)
+            }
+            "tag_name=v$next" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "prerelease=${{ inputs.prerelease }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/installer/*.exe
+          tag_name: ${{ steps.release.outputs.tag_name }}
+          name: ${{ steps.release.outputs.tag_name }}
           generate_release_notes: true
+          files: dist/installer/*.exe
+          prerelease: ${{ steps.release.outputs.prerelease == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

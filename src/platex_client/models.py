@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from io import BytesIO
+from typing import Any
 
 
 @dataclass(slots=True)
@@ -21,6 +23,15 @@ class ClipboardImage:
     image_bytes: bytes
     width: int
     height: int
+    fingerprint: str = ""
+    _pil_image: Any = field(default=None, repr=False)
+
+    def get_pil_image(self) -> Any:
+        from PIL import Image
+
+        if self._pil_image is not None:
+            return self._pil_image
+        return Image.open(BytesIO(self.image_bytes))
 
 
 class OcrProcessor:

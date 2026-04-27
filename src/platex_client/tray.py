@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import ctypes
+import base64
 import logging
 import os
 import queue
+import re
 import signal
 import subprocess
 import sys
@@ -18,14 +19,17 @@ from .app import PlatexApp
 from .clipboard import copy_text_to_clipboard
 from .config import default_config_path
 from .config_manager import ConfigManager, get_config_dir, set_config_dir, config_file_path
+from .events import EventBus, OcrSuccessEvent, ShowPanelEvent, ShutdownRequestEvent, get_event_bus
 from .history import HistoryStore
+from .i18n import t, on_language_changed
 from .models import ClipboardEvent
+from .platform_utils import is_startup_enabled, release_single_instance_lock, set_startup_enabled, startup_command, KERNEL32
+from .popup_manager import PopupManager
 
 
 _INSTANCE_PANEL_EVENT_NAME = r"Local\PLatexClient_ShowControlPanel"
 
 if sys.platform == "win32":
-    _kernel32 = ctypes.windll.kernel32
     _EVENT_MODIFY_STATE = 0x0002
     _SYNCHRONIZE = 0x00100000
     _INFINITE = 0xFFFFFFFF
@@ -35,27 +39,47 @@ def _load_pystray():
     try:
         import pystray
         from pystray import Menu, MenuItem
-    except ImportError as exc:  # pragma: no cover - optional dependency fallback
+    except ImportError as exc:
         raise RuntimeError("pystray is required for tray mode. Install project dependencies first.") from exc
 
     return pystray, Menu, MenuItem
 
 
 def _build_icon_image():
-    from PIL import Image, ImageDraw
+    import sys
 
-    image = Image.new("RGBA", (64, 64), (20, 24, 31, 255))
+    from PIL import Image
+
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+        candidates.append(base / "assets" / "platex-client.png")
+        candidates.append(base / "assets" / "platex-client.ico")
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.append(exe_dir / "assets" / "platex-client.png")
+        candidates.append(exe_dir / "assets" / "platex-client.ico")
+    else:
+        here = Path(__file__).resolve().parent.parent.parent
+        candidates.append(here / "assets" / "platex-client.png")
+        candidates.append(here / "assets" / "platex-client.ico")
+
+    for p in candidates:
+        if p.exists():
+            return Image.open(p).convert("RGBA").resize((64, 64), Image.LANCZOS)
+
+    from PIL import ImageDraw
+
+    image = Image.new("RGBA", (64, 64), (28, 28, 46, 255))
     draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((8, 8, 56, 56), radius=12, outline=(122, 162, 255, 255), width=3)
-    draw.line((18, 22, 18, 42), fill=(122, 162, 255, 255), width=4)
-    draw.line((46, 22, 46, 42), fill=(122, 162, 255, 255), width=4)
-    draw.line((18, 42, 32, 30), fill=(122, 162, 255, 255), width=4)
-    draw.line((32, 30, 46, 42), fill=(122, 162, 255, 255), width=4)
+    draw.rounded_rectangle((8, 8, 56, 56), radius=12, outline=(123, 162, 212, 255), width=3)
+    draw.line((18, 22, 18, 42), fill=(123, 162, 212, 255), width=4)
+    draw.line((46, 22, 46, 42), fill=(123, 162, 212, 255), width=4)
+    draw.line((18, 42, 32, 30), fill=(123, 162, 212, 255), width=4)
+    draw.line((32, 30, 46, 42), fill=(123, 162, 212, 255), width=4)
     return image
 
 
 def _panel_config_path() -> Path:
-    # Keep panel settings in the per-user config directory to avoid cwd-dependent loss.
     preferred = config_file_path()
     preferred.parent.mkdir(parents=True, exist_ok=True)
     if preferred.exists():
@@ -72,13 +96,53 @@ def _panel_config_path() -> Path:
             preferred.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
             return preferred
         except Exception:
-            # Fall back to legacy file if migration fails.
             return legacy
 
     return preferred
 
 
+def _validate_script_path_safety(script_path: Path) -> Path:
+    resolved = script_path.resolve()
+    if script_path.is_symlink():
+        raise ValueError(f"Script path is a symlink (not allowed): {script_path} -> {resolved}")
+    if ".." in script_path.parts:
+        raise ValueError(f"Script path contains '..' segments (not allowed): {script_path}")
+    if not resolved.is_file():
+        raise ValueError(f"Script path is not a regular file: {resolved}")
+    return resolved
+
+
 def _load_panel_config(default_script: Path) -> dict[str, Any]:
+    from .config import load_config
+
+    cfg = load_config()
+    active_script = str(cfg.script) if cfg.script else str(default_script)
+    if not active_script or not Path(active_script).exists():
+        active_script = str(default_script)
+
+    return {
+        "db_path": str(cfg.db_path) if cfg.db_path else "",
+        "script": active_script,
+        "log_file": str(cfg.log_file) if cfg.log_file else "",
+        "interval": cfg.interval,
+        "isolate_mode": cfg.isolate_mode,
+        "glm_api_key": cfg.glm_api_key or "",
+        "glm_model": cfg.glm_model or "",
+        "glm_base_url": cfg.glm_base_url or "",
+        "auto_start": cfg.auto_start,
+        "ui_language": cfg.ui_language,
+        "language_pack": cfg.language_pack,
+        "scripts": {},
+    }
+
+
+def _save_panel_config(payload: dict[str, Any]) -> None:
+    from .config import ConfigStore
+    store = ConfigStore.instance()
+    store.request_update_and_save(payload)
+
+
+def _ensure_scripts_in_config(script_configs: dict[str, dict[str, Any]]) -> None:
     path = _panel_config_path()
     payload: dict[str, Any] = {}
     if path.exists():
@@ -88,81 +152,24 @@ def _load_panel_config(default_script: Path) -> dict[str, Any]:
                 payload = loaded
         except Exception:
             payload = {}
-
-    script_val = payload.get("script")
-    active_script = str(default_script)
-    if isinstance(script_val, str) and script_val.strip():
-        active_script = script_val
-
-    return {
-        "db_path": payload.get("db_path") or "",
-        "script": active_script,
-        "log_file": payload.get("log_file") or "",
-        "interval": float(payload.get("interval", 0.8)),
-        "isolate_mode": bool(payload.get("isolate_mode", False)),
-        "glm_api_key": payload.get("glm_api_key") or "",
-        "glm_model": payload.get("glm_model") or "",
-        "glm_base_url": payload.get("glm_base_url") or "",
-        "auto_start": bool(payload.get("auto_start", False)),
-        "ui_language": str(payload.get("ui_language", "en")),
-        "language_pack": str(payload.get("language_pack", "")),
-        "scripts": payload.get("scripts") or {},
-    }
+    if "scripts" not in payload:
+        payload["scripts"] = script_configs
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        logger.info("Added scripts section to config file")
 
 
-def _save_panel_config(payload: dict[str, Any]) -> None:
-    clean = {k: v for k, v in payload.items() if v is not None and v != ""}
-    path = _panel_config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(clean, sort_keys=False, allow_unicode=True), encoding="utf-8")
+_UNSAFE_PS_CHARS = re.compile(r"[`$|;&{}()!@#~%+\x00-\x1f\"<>]")
 
 
-def _startup_command() -> str:
-    if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" tray'
-    if sys.platform == "win32":
-        exe = Path(sys.executable)
-        if exe.name.lower() == "python.exe":
-            pythonw = exe.with_name("pythonw.exe")
-            if pythonw.exists():
-                return f'"{pythonw}" -m platex_client.cli tray'
-    return f'"{sys.executable}" -m platex_client.cli tray'
-
-
-def _set_startup_enabled(enabled: bool) -> None:
-    if sys.platform != "win32":
-        return
-
-    import winreg
-
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    app_name = "PLatexClient"
-    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE) as key:
-        if enabled:
-            winreg.SetValueEx(key, app_name, 0, winreg.REG_SZ, _startup_command())
-        else:
-            try:
-                winreg.DeleteValue(key, app_name)
-            except FileNotFoundError:
-                pass
-
-
-def _is_startup_enabled() -> bool:
-    if sys.platform != "win32":
-        return False
-
-    import winreg
-
-    key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    app_name = "PLatexClient"
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ) as key:
-            value, _ = winreg.QueryValueEx(key, app_name)
-            return isinstance(value, str) and bool(value.strip())
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return False
+def _sanitize_path_for_ps(path_str: str) -> str:
+    path_obj = Path(path_str).resolve()
+    resolved = str(path_obj)
+    if _UNSAFE_PS_CHARS.search(resolved):
+        raise ValueError(f"Path contains unsafe characters for shell use: {resolved}")
+    if "'" in resolved:
+        raise ValueError(f"Path contains single quotes which cannot be safely escaped for shell use: {resolved}")
+    return resolved
 
 
 def _open_runtime_terminal(script_path: Path, log_path: str | None) -> None:
@@ -171,7 +178,12 @@ def _open_runtime_terminal(script_path: Path, log_path: str | None) -> None:
 
     workdir = script_path.parent if script_path.exists() else Path.cwd()
     log_file = Path(log_path).expanduser() if log_path else None
-    safe_workdir = str(workdir).replace("'", "''")
+
+    try:
+        safe_workdir = _sanitize_path_for_ps(str(workdir))
+    except ValueError as exc:
+        logger.error("Unsafe workdir path rejected: %s", exc)
+        return
 
     ps_lines = [
         f"Set-Location -LiteralPath '{safe_workdir}'",
@@ -179,18 +191,24 @@ def _open_runtime_terminal(script_path: Path, log_path: str | None) -> None:
         "Write-Host 'You can run: .\\platex-client.exe logs --limit 200' -ForegroundColor DarkGray",
     ]
     if log_file is not None:
-        safe_log = str(log_file).replace("'", "''")
-        ps_lines.extend(
-            [
-                "Write-Host ''",
-                f"Write-Host 'Tailing log: {safe_log}' -ForegroundColor Green",
-                f"Get-Content -LiteralPath '{safe_log}' -Tail 50",
-            ]
-        )
+        try:
+            safe_log = _sanitize_path_for_ps(str(log_file))
+        except ValueError as exc:
+            logger.error("Unsafe log path rejected: %s", exc)
+            safe_log = None
+        if safe_log is not None:
+            ps_lines.extend(
+                [
+                    "Write-Host ''",
+                    f"Write-Host 'Tailing log: {safe_log}' -ForegroundColor Green",
+                    f"Get-Content -LiteralPath '{safe_log}' -Tail 50",
+                ]
+            )
 
     command = "; ".join(ps_lines)
+    encoded_command = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
     subprocess.Popen(
-        ["powershell.exe", "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", command],
+        ["powershell.exe", "-NoExit", "-EncodedCommand", encoded_command],
         creationflags=subprocess.CREATE_NEW_CONSOLE,
     )
 
@@ -199,10 +217,13 @@ def _create_instance_panel_event():
     if sys.platform != "win32":
         return None
 
-    handle = _kernel32.CreateEventW(None, False, False, _INSTANCE_PANEL_EVENT_NAME)
+    handle = KERNEL32.CreateEventW(None, False, False, _INSTANCE_PANEL_EVENT_NAME)
     if not handle:
         return None
     return handle
+
+
+logger = logging.getLogger("platex.tray")
 
 
 @dataclass(slots=True)
@@ -218,800 +239,87 @@ class TrayController:
         return text[: limit - 1] + "…"
 
     def run(self, *, open_panel_on_start: bool = False) -> int:
-        logger = logging.getLogger("platex.tray")
         pystray, Menu, MenuItem = _load_pystray()
         previous_sigint_handler = signal.getsignal(signal.SIGINT)
 
         private_cfg = _load_panel_config(self.app.script_path)
         active_script_raw = private_cfg.get("script")
         active_script = Path(active_script_raw) if isinstance(active_script_raw, str) and active_script_raw else self.app.script_path
+        try:
+            active_script = _validate_script_path_safety(active_script)
+        except ValueError as exc:
+            logger.warning("Script path from config rejected: %s. Falling back to default.", exc)
+            active_script = self.app.script_path
         if active_script.exists():
             self.app.script_path = active_script
 
         startup_script_configs = private_cfg.get("scripts") if isinstance(private_cfg.get("scripts"), dict) else {}
 
-        popup_queue: queue.Queue[tuple[str, str, int] | None] = queue.Queue()
-        panel_queue: queue.Queue[str | None] = queue.Queue()
-        popup_stop = threading.Event()
+        popup_manager = PopupManager()
         panel_event_handle = _create_instance_panel_event()
 
         def popup_loop() -> None:
+            logger.info("Starting popup_loop")
             os.environ.setdefault("QT_OPENGL", "software")
             os.environ.setdefault("QT_QUICK_BACKEND", "software")
             try:
                 from PyQt6.QtCore import QTimer, Qt
-                from PyQt6.QtWidgets import (
-                    QApplication,
-                    QCheckBox,
-                    QComboBox,
-                    QFileDialog,
-                    QHBoxLayout,
-                    QLabel,
-                    QLineEdit,
-                    QMessageBox,
-                    QPlainTextEdit,
-                    QPushButton,
-                    QTabWidget,
-                    QVBoxLayout,
-                    QWidget,
-                )
-            except Exception as exc:  # noqa: BLE001
+                from PyQt6.QtWidgets import QApplication
+            except Exception as exc:
                 logger.exception("PyQt popup unavailable: %s", exc)
+                popup_manager.request_shutdown()
                 return
 
-            app = QApplication([])
+            logger.info("PyQt6 imported successfully, creating QApplication")
+            app = QApplication.instance()
+            if app is None:
+                try:
+                    app = QApplication([])
+                except Exception as exc:
+                    logger.exception("Failed to create QApplication: %s", exc)
+                    popup_manager.request_shutdown()
+                    return
+            logger.info("QApplication ready, setting up event loop")
             app.setQuitOnLastWindowClosed(False)
-            panel_window: QWidget | None = None
-            active_popups: list[QWidget] = []
+
+            from .ui.popup import Popup
+            from .ui.control_panel import ControlPanel
+
+            panel_window = None
+            active_popups = []
+            active_popups_lock = threading.Lock()
+            _MAX_ACTIVE_POPUPS = 10
 
             def _handle_panel_commands() -> None:
                 nonlocal panel_window
                 while True:
                     try:
-                        panel_cmd = panel_queue.get_nowait()
+                        panel_cmd = popup_manager.panel_queue.get_nowait()
                     except queue.Empty:
                         break
 
                     if panel_cmd == "open-panel":
+                        logger.info("Received open-panel command")
                         if panel_window is None or not panel_window.isVisible():
-                            panel_window = _ControlPanel(controller_ref=self)
+                            logger.info("Creating new control panel window")
+                            panel_window = ControlPanel(controller_ref=self)
                             panel_window.show()
+                            logger.info("Control panel window shown")
                         else:
+                            logger.info("Raising existing control panel window")
                             panel_window.raise_()
                             panel_window.activateWindow()
-
-            class _Popup(QWidget):
-                def __init__(self, title: str, message: str, latex: str) -> None:
-                    super().__init__(None)
-                    self._fade_timer: QTimer | None = None
-                    self._fade_step = 0
-                    self._fade_total_steps = 24
-                    self._latex = latex
-                    self._copied = False
-                    self.setWindowTitle(title)
-                    self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-                    self.setWindowFlag(Qt.WindowType.Tool, True)
-                    self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-                    self.setFixedSize(560, 180)
-                    self.setStyleSheet(
-                        "background:#ffffff;border:1px solid #7aa2ff;border-radius:10px;"
-                        "color:#111111;"
-                    )
-
-                    layout = QVBoxLayout(self)
-                    layout.setContentsMargins(16, 12, 16, 12)
-                    layout.setSpacing(8)
-
-                    title_label = QLabel(title)
-                    title_label.setStyleSheet("font-size:15px;font-weight:700;color:#1f2937;")
-                    body_label = QLabel(message)
-                    body_label.setWordWrap(True)
-                    body_label.setStyleSheet("font-size:13px;line-height:1.35;color:#111827;")
-
-                    layout.addWidget(title_label)
-                    layout.addWidget(body_label)
-
-                def mousePressEvent(self, event):  # noqa: N802
-                    if not self._copied:
-                        copy_text_to_clipboard(self._latex)
-                        self._copied = True
-                    self.close()
-                    event.accept()
-
-                def keyPressEvent(self, event):  # noqa: N802
-                    self.close()
-                    event.accept()
-
-                def start_auto_fade(self, timeout_ms: int) -> None:
-                    hold_ms = max(500, timeout_ms - 700)
-                    QTimer.singleShot(hold_ms, self._begin_fade)
-
-                def _begin_fade(self) -> None:
-                    if not self.isVisible():
-                        return
-                    self._fade_step = 0
-                    self._fade_timer = QTimer(self)
-                    self._fade_timer.timeout.connect(self._fade_tick)
-                    self._fade_timer.start(30)
-
-                def _fade_tick(self) -> None:
-                    if not self.isVisible():
-                        if self._fade_timer is not None:
-                            self._fade_timer.stop()
-                        return
-                    self._fade_step += 1
-                    opacity = max(0.0, 1.0 - (self._fade_step / self._fade_total_steps))
-                    self.setWindowOpacity(opacity)
-                    if self._fade_step >= self._fade_total_steps:
-                        if self._fade_timer is not None:
-                            self._fade_timer.stop()
-                        self.close()
-
-            controller = self
-
-            class _ControlPanel(QWidget):
-                def __init__(self, controller_ref: TrayController) -> None:
-                    super().__init__(None)
-                    self._controller = controller_ref
-                    self.setWindowTitle("PLatex 控制面板")
-                    self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-                    self.setMinimumSize(800, 600)
-
-                    root = QVBoxLayout(self)
-                    root.setContentsMargins(14, 14, 14, 14)
-                    root.setSpacing(10)
-
-                    self._tab_widget = QTabWidget()
-                    root.addWidget(self._tab_widget)
-
-                    self._general_tab = self._create_general_tab()
-                    self._tab_widget.addTab(self._general_tab, "通用设置")
-
-                    self._script_tabs: dict[str, QWidget] = {}
-                    self._create_script_tabs()
-
-                    action_row = QHBoxLayout()
-                    btn_save = QPushButton("保存并应用")
-                    btn_terminal = QPushButton("打开终端")
-                    btn_close = QPushButton("关闭")
-                    action_row.addWidget(btn_save)
-                    action_row.addWidget(btn_terminal)
-                    action_row.addWidget(btn_close)
-                    root.addLayout(action_row)
-
-                    btn_save.clicked.connect(lambda: self._save_apply(show_result_message=True, restart_app=True))
-                    btn_terminal.clicked.connect(self._open_terminal)
-                    btn_close.clicked.connect(self.close)
-
-                def closeEvent(self, event) -> None:  # noqa: N802
-                    # Keep script UI and global config in sync even if the panel is closed via X.
-                    if self._save_apply(show_result_message=False, restart_app=False):
-                        event.accept()
-                    else:
-                        event.ignore()
-
-                def _create_general_tab(self) -> QWidget:
-                    tab = QWidget()
-                    layout = QVBoxLayout(tab)
-                    layout.setContentsMargins(8, 8, 8, 8)
-                    layout.setSpacing(10)
-
-                    self.auto_start = QCheckBox("开机自启")
-                    layout.addWidget(self.auto_start)
-
-                    lang_row = QHBoxLayout()
-                    lang_row.addWidget(QLabel("客户端语言"))
-                    self.ui_language = QComboBox()
-                    self.ui_language.addItem("中文（zh-cn）", "zh-cn")
-                    self.ui_language.addItem("English (en)", "en")
-                    lang_row.addWidget(self.ui_language)
-                    layout.addLayout(lang_row)
-
-                    config_dir_row = QHBoxLayout()
-                    config_dir_row.addWidget(QLabel("配置目录:"))
-                    self._config_dir_edit = QLineEdit(str(get_config_dir()))
-                    self._config_dir_edit.setReadOnly(True)
-                    config_dir_row.addWidget(self._config_dir_edit, 1)
-                    btn_change_dir = QPushButton("更改")
-                    btn_change_dir.clicked.connect(self._change_config_dir)
-                    config_dir_row.addWidget(btn_change_dir)
-                    layout.addLayout(config_dir_row)
-
-                    # Hotkey status section
-                    hotkey_status_box = QWidget()
-                    hotkey_status_layout = QVBoxLayout(hotkey_status_box)
-                    hotkey_status_layout.setContentsMargins(10, 10, 10, 10)
-                    hotkey_status_layout.setSpacing(6)
-                    hotkey_status_box.setStyleSheet(
-                        "QWidget { background: #f8f9fa; border: 1px solid #e2e8f0; border-radius: 8px; }"
-                    )
-
-                    hotkey_header = QHBoxLayout()
-                    hotkey_title = QLabel("快捷键状态")
-                    hotkey_title.setStyleSheet("font-size: 13px; font-weight: 600; color: #1f2937; border: none; background: transparent;")
-                    hotkey_header.addWidget(hotkey_title)
-                    btn_refresh_hotkeys = QPushButton("刷新")
-                    btn_refresh_hotkeys.setFixedWidth(60)
-                    btn_refresh_hotkeys.setStyleSheet(
-                        "QPushButton { padding: 4px 8px; font-size: 11px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }"
-                    )
-                    btn_refresh_hotkeys.clicked.connect(self._refresh_hotkey_status)
-                    hotkey_header.addWidget(btn_refresh_hotkeys)
-                    hotkey_header.addStretch()
-                    hotkey_status_layout.addLayout(hotkey_header)
-
-                    self._hotkey_status_label = QLabel("加载中...")
-                    self._hotkey_status_label.setStyleSheet("font-size: 12px; color: #4b5563; border: none; background: transparent;")
-                    self._hotkey_status_label.setWordWrap(True)
-                    hotkey_status_layout.addWidget(self._hotkey_status_label)
-
-                    # Refresh hotkey status when control panel is opened
-                    self._refresh_hotkey_status()
-
-                    layout.addWidget(hotkey_status_box)
-
-                    io_row = QHBoxLayout()
-                    btn_export_all = QPushButton("导出全部配置")
-                    btn_import_all = QPushButton("导入全部配置")
-                    btn_export_all.setStyleSheet("QPushButton { padding: 6px 12px; }")
-                    btn_import_all.setStyleSheet("QPushButton { padding: 6px 12px; }")
-                    btn_export_all.clicked.connect(self._export_all_config)
-                    btn_import_all.clicked.connect(self._import_all_config)
-                    io_row.addWidget(btn_export_all)
-                    io_row.addWidget(btn_import_all)
-                    io_row.addStretch()
-                    layout.addLayout(io_row)
-
-                    self._yaml_toggle_btn = QPushButton("▶ 显示配置文件 (YAML)")
-                    self._yaml_toggle_btn.setStyleSheet("QPushButton { font-size: 12px; color: #555; border: none; text-align: left; padding: 4px 0; }")
-                    self._yaml_toggle_btn.setCheckable(True)
-                    layout.addWidget(self._yaml_toggle_btn)
-
-                    self._yaml_container = QWidget()
-                    yaml_container_layout = QVBoxLayout(self._yaml_container)
-                    yaml_container_layout.setContentsMargins(0, 0, 0, 0)
-                    self.yaml_editor = QPlainTextEdit()
-                    self.yaml_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-                    self._yaml_text = self._load_yaml_text()
-                    self.yaml_editor.setPlainText(self._hide_api_key(self._yaml_text))
-                    yaml_container_layout.addWidget(self.yaml_editor)
-                    self._yaml_container.setVisible(False)
-                    layout.addWidget(self._yaml_container)
-
-                    self._yaml_toggle_btn.toggled.connect(self._toggle_yaml_editor)
-
-                    self._sync_ui_from_yaml()
-                    self._refresh_hotkey_status()
-                    return tab
-
-                def _create_script_tabs(self) -> None:
-                    registry = controller.app.registry
-                    for entry in registry.get_all_scripts():
-                        script = entry.script
-                        try:
-                            widget = script.create_settings_widget(self._tab_widget)
-                        except Exception:
-                            logger.exception("Failed to create settings widget for script %s", script.name)
-                            widget = None
-
-                        if widget is not None:
-                            change_cb = getattr(widget, "set_settings_changed_callback", None)
-                            if callable(change_cb):
-                                change_cb(self._persist_script_settings)
-
-                            save_fn = getattr(widget, "save_settings", None)
-                            if callable(save_fn):
-                                self._script_tabs[script.name] = widget
-
-                            load_fn = getattr(widget, "load_settings", None)
-                            if callable(load_fn):
-                                try:
-                                    load_fn()
-                                except Exception:
-                                    logger.exception("Failed to initialize script settings widget for %s", script.name)
-
-                            container = QWidget()
-                            container_layout = QVBoxLayout(container)
-                            container_layout.setContentsMargins(0, 0, 0, 0)
-                            container_layout.setSpacing(0)
-                            container_layout.addWidget(widget, 1)
-
-                            io_row = QHBoxLayout()
-                            io_row.setContentsMargins(12, 4, 12, 8)
-                            btn_import = QPushButton("\u5bfc\u5165\u914d\u7f6e")
-                            btn_export = QPushButton("\u5bfc\u51fa\u914d\u7f6e")
-                            import_style = "QPushButton { padding: 4px 12px; font-size: 12px; border: 1px solid #aaa; border-radius: 3px; }"
-                            btn_import.setStyleSheet(import_style)
-                            btn_export.setStyleSheet(import_style)
-
-                            def _make_import(s=script, w=widget):
-                                def _do_import():
-                                    try:
-                                        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-                                        filepath, _ = QFileDialog.getOpenFileName(
-                                            self, f"\u5bfc\u5165 {s.display_name} \u914d\u7f6e", str(Path.cwd()),
-                                            "YAML \u6587\u4ef6 (*.yaml *.yml);;\u6240\u6709\u6587\u4ef6 (*)",
-                                        )
-                                        if not filepath:
-                                            return
-                                        s.import_config(Path(filepath))
-                                        load_fn = getattr(w, "load_settings", None)
-                                        if callable(load_fn):
-                                            load_fn()
-                                        QMessageBox.information(self, "\u5bfc\u5165\u6210\u529f", f"{s.display_name} \u914d\u7f6e\u5df2\u5bfc\u5165\u3002")
-                                    except Exception as exc:
-                                        from PyQt6.QtWidgets import QMessageBox
-                                        QMessageBox.warning(self, "\u5bfc\u5165\u5931\u8d25", str(exc))
-                                return _do_import
-
-                            def _make_export(s=script):
-                                def _do_export():
-                                    try:
-                                        from PyQt6.QtWidgets import QFileDialog, QMessageBox
-                                        filepath, _ = QFileDialog.getSaveFileName(
-                                            self, f"\u5bfc\u51fa {s.display_name} \u914d\u7f6e",
-                                            str(Path.cwd() / f"{s.name}-config.yaml"),
-                                            "YAML \u6587\u4ef6 (*.yaml *.yml);;\u6240\u6709\u6587\u4ef6 (*)",
-                                        )
-                                        if not filepath:
-                                            return
-                                        s.export_config(Path(filepath))
-                                        QMessageBox.information(self, "\u5bfc\u51fa\u6210\u529f", f"\u914d\u7f6e\u5df2\u5bfc\u51fa\u5230:\n{filepath}")
-                                    except Exception as exc:
-                                        from PyQt6.QtWidgets import QMessageBox
-                                        QMessageBox.warning(self, "\u5bfc\u51fa\u5931\u8d25", str(exc))
-                                return _do_export
-
-                            btn_import.clicked.connect(_make_import())
-                            btn_export.clicked.connect(_make_export())
-                            io_row.addWidget(btn_import)
-                            io_row.addWidget(btn_export)
-                            io_row.addStretch()
-                            container_layout.addLayout(io_row)
-
-                            self._tab_widget.addTab(container, script.display_name)
-
-                def _persist_script_settings(self) -> None:
-                    payload = _load_panel_config(controller.app.script_path)
-                    payload["scripts"] = controller.app.registry.save_configs()
-                    text = yaml.safe_dump({k: v for k, v in payload.items() if v is not None and v != ""}, sort_keys=False, allow_unicode=True)
-
-                    cfg_path = _panel_config_path()
-                    current_text = ""
-                    if cfg_path.exists():
-                        try:
-                            current_text = cfg_path.read_text(encoding="utf-8")
-                        except Exception:
-                            current_text = ""
-
-                    if current_text == text:
-                        return
-
-                    try:
-                        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                        cfg_path.write_text(text, encoding="utf-8")
-                    except Exception as exc:  # noqa: BLE001
-                        logger.exception("Failed to persist script settings: %s", exc)
-                        return
-
-                    if not self.yaml_editor.hasFocus():
-                        self._yaml_text = text
-                        self.yaml_editor.blockSignals(True)
-                        try:
-                            self.yaml_editor.setPlainText(self._hide_api_key(self._yaml_text))
-                        finally:
-                            self.yaml_editor.blockSignals(False)
-
-                    controller.app.apply_registry_hotkeys()
-
-                def _change_config_dir(self) -> None:
-                    current = get_config_dir()
-                    new_dir = QFileDialog.getExistingDirectory(
-                        self, "选择配置目录", str(current),
-                    )
-                    if not new_dir:
-                        return
-                    new_path = Path(new_dir)
-                    try:
-                        set_config_dir(new_path)
-                        self._config_dir_edit.setText(str(new_path))
-                        QMessageBox.information(
-                            self, "配置目录已更改",
-                            f"配置目录已设置为:\n{new_path}\n\n"
-                            "如需迁移已有配置，请手动复制旧目录中的文件到新目录。\n"
-                            "重启后生效。",
-                        )
-                    except Exception as exc:
-                        QMessageBox.warning(self, "更改失败", str(exc))
-
-                def _export_all_config(self) -> None:
-                    filepath, _ = QFileDialog.getSaveFileName(
-                        self, "导出全部配置", str(Path.cwd() / "platex-config.yaml"),
-                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
-                    )
-                    if not filepath:
-                        return
-                    try:
-                        mgr = ConfigManager(controller.app.registry)
-                        mgr.export_all(Path(filepath))
-                        QMessageBox.information(self, "导出成功", f"配置已导出到:\n{filepath}")
-                    except Exception as exc:
-                        QMessageBox.warning(self, "导出失败", str(exc))
-
-                def _import_all_config(self) -> None:
-                    filepath, _ = QFileDialog.getOpenFileName(
-                        self, "导入全部配置", str(Path.cwd()),
-                        "YAML 文件 (*.yaml *.yml);;所有文件 (*)",
-                    )
-                    if not filepath:
-                        return
-                    try:
-                        mgr = ConfigManager(controller.app.registry)
-                        result = mgr.import_all(Path(filepath))
-                    except Exception as exc:
-                        QMessageBox.warning(self, "导入失败", str(exc))
-                        return
-
-                    general = result.get("general", {})
-                    scripts = result.get("scripts", {})
-
-                    if general:
-                        yaml_text = yaml.safe_dump(general, sort_keys=False, allow_unicode=True)
-                        self.yaml_editor.setPlainText(yaml_text)
-                        self._sync_ui_from_yaml()
-
-                    if scripts and controller.app.registry:
-                        controller.app.registry.load_configs(scripts)
-
-                    QMessageBox.information(self, "导入成功", "配置已导入。请检查后点击「保存并应用」。")
-
-                def _toggle_yaml_editor(self, checked: bool) -> None:
-                    if checked:
-                        self._yaml_toggle_btn.setText("▼ 隐藏配置文件 (YAML)")
-                        self._yaml_container.setVisible(True)
-                    else:
-                        self._yaml_toggle_btn.setText("▶ 显示配置文件 (YAML)")
-                        self._yaml_container.setVisible(False)
-
-                def _refresh_hotkey_status(self) -> None:
-                    """Update the hotkey status label in the control panel."""
-                    try:
-                        status = controller.app.hotkey_listener.get_status()
-                    except Exception as exc:
-                        self._hotkey_status_label.setText(f"无法获取快捷键状态: {exc}")
-                        return
-
-                    backend = status.get("backend", "none")
-                    registered = status.get("bindings", [])
-                    failed = status.get("failed", {})
-                    running = status.get("running", False)
-
-                    lines: list[str] = []
-
-                    # Backend info
-                    backend_names = {"win32": "Win32 API (推荐)", "pynput": "pynput (备用)", "none": "无"}
-                    backend_str = backend_names.get(backend, backend)
-                    lines.append(f"后端: {backend_str}")
-
-                    # Running status
-                    if running:
-                        lines.append(f"状态: 运行中 | 已注册: {len(registered)} 个")
-                    else:
-                        lines.append("状态: 已停止")
-
-                    # List registered hotkeys
-                    if registered:
-                        lines.append(f"已注册: {', '.join(registered)}")
-                        lines.append("<span style='color: #166534;'>✓ 所有快捷键正常工作</span>")
-                    else:
-                        lines.append("<span style='color: #dc2626;'>⚠ 未注册任何快捷键</span>")
-
-                    # Show failures
-                    if failed:
-                        failed_items = []
-                        for hk, count in failed.items():
-                            failed_items.append(f"{hk} (重试 {count} 次)")
-                        lines.append(f"<span style='color: #dc2626;'>✗ 注册失败 (被其他程序占用): {', '.join(failed_items)}</span>")
-                        lines.append("<span style='color: #666; font-size: 11px;'>💡 解决: 关闭占用快捷键的其他软件后，点击「保存并应用」重试。</span>")
-                    else:
-                        lines.append("<span style='color: #166534;'>无冲突</span>")
-
-                    self._hotkey_status_label.setText("<br>".join(lines))
-
-                @staticmethod
-                def _hide_api_key(yaml_text: str) -> str:
-                    """Replace api_key values with placeholder in YAML preview."""
-                    import re
-                    return re.sub(r'^(api_key\s*:\s*).*$', r'\1***', yaml_text, flags=re.MULTILINE)
-
-                @staticmethod
-                def _restore_api_key(edited_text: str, original_text: str) -> str:
-                    """Restore api_key from original if user didn't change it (left *** placeholder)."""
-                    import re
-                    edited_lines = edited_text.splitlines()
-                    original_lines = original_text.splitlines()
-                    result_lines: list[str] = []
-                    orig_key = None
-                    for line in original_lines:
-                        m = re.match(r'^api_key\s*:\s*(.+)$', line)
-                        if m:
-                            orig_key = m.group(1).strip()
-
-                    for line in edited_lines:
-                        m = re.match(r'^(api_key\s*:\s*)(\*{3,}|.+)$', line)
-                        if m:
-                            prefix = m.group(1)
-                            val = m.group(2).strip()
-                            if val.startswith("*") and orig_key:
-                                result_lines.append(prefix + orig_key)
-                            else:
-                                result_lines.append(line)
-                        else:
-                            result_lines.append(line)
-                    return "\n".join(result_lines)
-
-                @staticmethod
-                def _strip_api_keys(data: dict[str, Any]) -> dict[str, Any]:
-                    """Recursively strip api_key values from payload for disk storage."""
-                    import copy
-                    result = copy.deepcopy(data)
-                    def _strip(obj: Any) -> None:
-                        if isinstance(obj, dict):
-                            for k, v in list(obj.items()):
-                                if k == "api_key" and isinstance(v, str) and v:
-                                    obj[k] = v[:4] + "*" * max(0, len(v) - 4) if len(v) > 4 else "****"
-                                else:
-                                    _strip(v)
-                        elif isinstance(obj, list):
-                            for item in obj:
-                                _strip(item)
-                    _strip(result)
-                    return result
-
-                def _sync_ui_from_yaml(self) -> None:
-                    payload: dict[str, Any] = {}
-                    try:
-                        payload = self._parse_yaml()
-                    except Exception:
-                        payload = {}
-
-                    auto_start = bool(payload.get("auto_start", _is_startup_enabled() or bool(private_cfg.get("auto_start", False))))
-                    self.auto_start.setChecked(auto_start)
-
-                    lang = str(payload.get("ui_language", private_cfg.get("ui_language", "en"))).strip().lower() or "en"
-                    lang_idx = self.ui_language.findData(lang)
-                    if lang_idx < 0:
-                        lang_idx = self.ui_language.findData("en")
-                    self.ui_language.setCurrentIndex(max(0, lang_idx))
-
-                def _load_yaml_text(self) -> str:
-                    cfg_path = _panel_config_path()
-                    if cfg_path.exists():
-                        text = cfg_path.read_text(encoding="utf-8")
-                        self._yaml_text = text
-                        return text
-
-                    seed = dict(private_cfg)
-                    seed["script"] = str(controller.app.script_path)
-                    seed["auto_start"] = bool(_is_startup_enabled() or seed.get("auto_start", False))
-                    script_configs = controller.app.registry.save_configs()
-                    if script_configs:
-                        seed["scripts"] = script_configs
-                    self._yaml_text = yaml.safe_dump(seed, sort_keys=False, allow_unicode=True)
-                    return self._yaml_text
-
-                def _parse_yaml(self) -> dict[str, Any]:
-                    raw = self.yaml_editor.toPlainText()
-                    restored = self._restore_api_key(raw, self._yaml_text)
-                    loaded = yaml.safe_load(restored)
-                    if loaded is None:
-                        return {}
-                    if not isinstance(loaded, dict):
-                        raise ValueError("YAML 顶层必须是对象（key: value）。")
-                    # Fill masked api_key values from env vars or script state
-                    loaded = self._fill_masked_api_keys(loaded)
-                    return loaded
-
-                def _fill_masked_api_keys(self, data: dict[str, Any]) -> dict[str, Any]:
-                    """Replace masked api_key values with real ones from env vars or script state."""
-                    import re
-                    env_key = os.getenv("GLM_API_KEY", "")
-                    data = dict(data)
-                    # Top-level glm_api_key
-                    if isinstance(data.get("glm_api_key"), str):
-                        val = data["glm_api_key"]
-                        if val.startswith("*") or re.match(r"^.{1,4}\*+$", val):
-                            data["glm_api_key"] = env_key
-                    # Nested in scripts
-                    scripts = data.get("scripts")
-                    if isinstance(scripts, dict):
-                        new_scripts = {}
-                        for name, cfg in scripts.items():
-                            if isinstance(cfg, dict):
-                                new_cfg = dict(cfg)
-                                ak = new_cfg.get("api_key", "")
-                                if isinstance(ak, str) and (ak.startswith("*") or re.match(r"^.{1,4}\*+$", ak)):
-                                    new_cfg["api_key"] = env_key
-                                new_scripts[name] = new_cfg
-                            else:
-                                new_scripts[name] = cfg
-                        data["scripts"] = new_scripts
-                    return data
-
-                def _save_apply(self, *, show_result_message: bool = True, restart_app: bool = True) -> bool:
-                    try:
-                        payload = self._parse_yaml()
-                    except Exception as exc:  # noqa: BLE001
-                        QMessageBox.warning(self, "YAML 解析失败", str(exc))
-                        return False
-
-                    # Always flush current script UI values into runtime state first.
-                    for widget in self._script_tabs.values():
-                        save_fn = getattr(widget, "save_settings", None)
-                        if callable(save_fn):
-                            try:
-                                save_fn()
-                            except Exception:
-                                logger.exception("Failed to flush script settings from UI")
-
-                    script_val = payload.get("script")
-                    chosen = controller.app.script_path
-                    if isinstance(script_val, str) and script_val.strip():
-                        chosen = Path(script_val.strip())
-                    if not chosen.exists():
-                        QMessageBox.warning(self, "路径无效", "YAML 中 script 指向的脚本不存在。")
-                        return False
-
-                    interval_raw = payload.get("interval", controller.app.interval)
-                    try:
-                        interval = float(interval_raw)
-                    except Exception:  # noqa: BLE001
-                        QMessageBox.warning(self, "配置无效", "YAML 中 interval 必须是数字。")
-                        return False
-
-                    isolate_mode = bool(payload.get("isolate_mode", controller.app.isolate_mode))
-                    auto_start = bool(self.auto_start.isChecked())
-                    ui_language = str(self.ui_language.currentData() or "en")
-
-                    payload["auto_start"] = auto_start
-                    payload["ui_language"] = ui_language
-
-                    script_configs: dict[str, dict[str, Any]] = {}
-                    if restart_app:
-                        edited_scripts = payload.get("scripts")
-                        if not isinstance(edited_scripts, dict):
-                            edited_scripts = {}
-
-                        # Detect whether scripts section was edited in YAML editor.
-                        baseline_scripts: dict[str, Any] = {}
-                        try:
-                            baseline_loaded = yaml.safe_load(self._yaml_text)
-                            if isinstance(baseline_loaded, dict) and isinstance(baseline_loaded.get("scripts"), dict):
-                                baseline_scripts = baseline_loaded["scripts"]
-                        except Exception:
-                            baseline_scripts = {}
-
-                        yaml_scripts_changed = edited_scripts != baseline_scripts
-                        if yaml_scripts_changed:
-                            # YAML is authoritative when scripts section changed; apply directly to runtime.
-                            controller.app.registry.load_configs(edited_scripts)
-                            for widget in self._script_tabs.values():
-                                load_fn = getattr(widget, "load_settings", None)
-                                if callable(load_fn):
-                                    try:
-                                        load_fn()
-                                    except Exception:
-                                        logger.exception("Failed to refresh script settings widget from YAML")
-                            script_configs = controller.app.registry.save_configs()
-                        else:
-                            # No scripts edits in YAML; use the flushed runtime script state.
-                            script_configs = controller.app.registry.save_configs()
-                    else:
-                        # On close, trust the live script runtime state only.
-                        script_configs = controller.app.registry.save_configs()
-
-                    if script_configs:
-                        payload["scripts"] = script_configs
-
-                    # Extract GLM config from OCR script for env vars and top-level settings
-                    registry = controller.app.registry
-                    ocr_entries = registry.get_ocr_scripts()
-                    for entry in ocr_entries:
-                        ocr_config = entry.script.save_config()
-                        if ocr_config.get("api_key"):
-                            payload["glm_api_key"] = ocr_config["api_key"]
-                        if ocr_config.get("model"):
-                            payload["glm_model"] = ocr_config["model"]
-                        if ocr_config.get("base_url"):
-                            payload["glm_base_url"] = ocr_config["base_url"]
-
-                    try:
-                        _set_startup_enabled(auto_start)
-                    except Exception as exc:  # noqa: BLE001
-                        QMessageBox.warning(self, "开机自启失败", str(exc))
-                        return False
-
-                    # Set env vars BEFORE stripping api_key from payload for disk storage
-                    glm_api_key = payload.get("glm_api_key")
-                    glm_model = payload.get("glm_model")
-                    glm_base_url = payload.get("glm_base_url")
-                    if isinstance(glm_api_key, str) and glm_api_key:
-                        os.environ["GLM_API_KEY"] = glm_api_key
-                    if isinstance(glm_model, str) and glm_model:
-                        os.environ["GLM_MODEL"] = glm_model
-                    if isinstance(glm_base_url, str) and glm_base_url:
-                        os.environ["GLM_BASE_URL"] = glm_base_url
-
-                    # Strip real api_key values before writing to YAML on disk
-                    disk_payload = self._strip_api_keys(payload)
-                    text = yaml.safe_dump(disk_payload, sort_keys=False, allow_unicode=True)
-                    try:
-                        cfg_path = _panel_config_path()
-                        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-                        cfg_path.write_text(text, encoding="utf-8")
-                    except Exception as exc:  # noqa: BLE001
-                        QMessageBox.warning(self, "保存失败", str(exc))
-                        return False
-
-                    # Update editor with masked version
-                    self._yaml_text = text
-                    self.yaml_editor.setPlainText(self._hide_api_key(text))
-
-                    # Apply script configs
-                    scripts_config = payload.get("scripts", {})
-                    if isinstance(scripts_config, dict):
-                        controller.app.registry.load_configs(scripts_config)
-
-                    # Re-register hotkeys
-                    controller.app.apply_registry_hotkeys()
-
-                    if restart_app:
-                        try:
-                            was_running = controller.app._worker is not None and controller.app._worker.is_alive()
-                            controller.app.stop()
-                            controller.app.script_path = chosen
-                            controller.app.interval = interval
-                            controller.app.isolate_mode = isolate_mode
-                            controller.app._watcher = None
-                            controller.app._stop_event.clear()
-                            if was_running:
-                                controller.app.start()
-                        except Exception as exc:  # noqa: BLE001
-                            QMessageBox.warning(self, "应用失败", str(exc))
-                            return False
-                    else:
-                        controller.app.script_path = chosen
-                        controller.app.interval = interval
-                        controller.app.isolate_mode = isolate_mode
-
-                    logger.info("Control panel applied: script=%s auto_start=%s", chosen, auto_start)
-                    if show_result_message:
-                        QMessageBox.information(self, "已保存", "YAML 配置已保存并应用。")
-                    return True
-
-                def _open_terminal(self) -> None:
-                    payload: dict[str, Any] = {}
-                    try:
-                        payload = self._parse_yaml()
-                    except Exception:
-                        payload = {}
-
-                    script_val = payload.get("script")
-                    log_val = payload.get("log_file")
-                    script_path = Path(script_val.strip()) if isinstance(script_val, str) and script_val.strip() else controller.app.script_path
-                    log_path = log_val.strip() if isinstance(log_val, str) else ""
-                    _open_runtime_terminal(script_path, log_path)
 
             def _pump_messages() -> None:
                 _handle_panel_commands()
                 while True:
                     try:
-                        item = popup_queue.get_nowait()
+                        item = popup_manager.popup_queue.get_nowait()
                     except queue.Empty:
                         break
 
                     if item is None:
+                        popup_manager.confirm_shutdown()
                         app.quit()
                         return
 
@@ -1019,9 +327,9 @@ class TrayController:
                     preview = latex.replace("\n", " ").strip()
                     if len(preview) > 220:
                         preview = preview[:217] + "..."
-                    message = f"{preview or 'OCR completed'}\n\n点击此弹窗后写入剪贴板。"
+                    message = f"{preview or t('tray_ocr_completed')}{t('tray_popup_click_to_copy')}"
 
-                    popup = _Popup(title, message, latex)
+                    popup = Popup(title, message, latex)
                     screen = app.primaryScreen()
                     if screen is not None:
                         available = screen.availableGeometry()
@@ -1034,13 +342,21 @@ class TrayController:
                     popup.raise_()
                     popup.activateWindow()
                     popup.start_auto_fade(timeout_ms)
-                    active_popups.append(popup)
+                    with active_popups_lock:
+                        while len(active_popups) >= _MAX_ACTIVE_POPUPS:
+                            oldest = active_popups.pop(0)
+                            try:
+                                oldest.close()
+                            except Exception:
+                                pass
+                        active_popups.append(popup)
 
-                    def _release_popup_ref(_obj=None, *, _popup=popup) -> None:  # noqa: N802
-                        try:
-                            active_popups.remove(_popup)
-                        except ValueError:
-                            pass
+                    def _release_popup_ref(_obj=None, *, _popup=popup) -> None:
+                        with active_popups_lock:
+                            try:
+                                active_popups.remove(_popup)
+                            except ValueError:
+                                pass
 
                     popup.destroyed.connect(_release_popup_ref)
 
@@ -1049,48 +365,38 @@ class TrayController:
             pump_timer.timeout.connect(_pump_messages)
             pump_timer.start()
 
+            logger.info("Starting Qt event loop (app.exec)")
             app.exec()
+            logger.info("Qt event loop exited")
 
         def _panel_signal_loop() -> None:
             if panel_event_handle is None:
                 return
-            while not popup_stop.is_set():
-                result = _kernel32.WaitForSingleObject(panel_event_handle, 250)
-                if result == 0:
-                    panel_queue.put("open-panel")
+            while not popup_manager.stop_event.is_set():
+                result = KERNEL32.WaitForSingleObject(panel_event_handle, 250)
+                if result == 0 and not popup_manager.stop_event.is_set():
+                    popup_manager.panel_queue.put("open-panel")
 
         panel_signal_thread = threading.Thread(target=_panel_signal_loop, name="platex-panel-signal-loop", daemon=True)
         panel_signal_thread.start()
         force_exit_timer: threading.Timer | None = None
-
-        def _request_shutdown() -> None:
-            if popup_stop.is_set():
-                return
-            popup_stop.set()
-            popup_queue.put(None)
-            panel_queue.put(None)
+        _quit_lock = threading.Lock()
+        _quit_started = False
 
         if open_panel_on_start:
-            panel_queue.put("open-panel")
-
-        def show_success_popup(title: str, latex: str, timeout_ms: int = 12000) -> None:
-            if popup_stop.is_set():
-                return
-            popup_queue.put((title, latex, timeout_ms))
-
-        def open_control_panel(_icon, _item) -> None:
-            if popup_stop.is_set():
-                return
-            panel_queue.put("open-panel")
+            logger.info("open_panel_on_start=True, queuing open-panel command")
+            popup_manager.panel_queue.put("open-panel")
+        else:
+            logger.info("open_panel_on_start=False, not opening panel automatically")
 
         def show_status() -> str:
             latest = self.history.latest()
-            mode = "isolated" if self.app.isolate_mode else "watching"
+            mode_str = t("tray_mode_isolated") if self.app.isolate_mode else t("tray_mode_watching")
             if latest is None:
-                return f"PLatex Client | {mode} | waiting for clipboard image"
+                return t("tray_status_waiting", mode=mode_str)
             if latest.status == "ok":
-                return self._limit_title(f"PLatex Client | {mode} | latest {latest.image_hash[:10]}")
-            return self._limit_title(f"PLatex Client | {mode} | last error {latest.error}")
+                return self._limit_title(t("tray_status_latest", mode=mode_str, hash=latest.image_hash[:10]))
+            return self._limit_title(t("tray_status_error", mode=mode_str, error=latest.error))
 
         def ocr_once(_icon, _item) -> None:
             event = self.app.run_once()
@@ -1103,59 +409,271 @@ class TrayController:
             icon.title = show_status()
 
         def notify_success(event: ClipboardEvent) -> None:
-            show_success_popup("PLatex OCR Success", event.latex)
+            popup_manager.show_popup(t("tray_ocr_success_title"), event.latex)
             logger.info("OCR success popup emitted hash=%s", event.image_hash[:10])
 
         def refresh(_icon, _item) -> None:
             icon.title = show_status()
 
+        def _force_exit() -> None:
+            logger.warning("Forcing exit after timeout - normal shutdown did not complete")
+            if sys.platform == "win32":
+                try:
+                    from .platform_utils import USER32
+                    if USER32 is not None:
+                        USER32.BlockInput(False)
+                except Exception:
+                    pass
+            try:
+                self.app.stop()
+            except Exception:
+                pass
+            try:
+                self.history.close()
+            except Exception:
+                pass
+            try:
+                release_single_instance_lock()
+            except Exception:
+                pass
+            os._exit(0)
+
         def quit_app(icon, _item) -> None:
-            nonlocal force_exit_timer
+            nonlocal force_exit_timer, _quit_started
+            with _quit_lock:
+                if _quit_started:
+                    return
+                _quit_started = True
             logger.info("Tray exit requested")
-            _request_shutdown()
-            self.app.stop()
-            icon.stop()
+            popup_manager.request_shutdown()
+            try:
+                icon.stop()
+            except Exception:
+                pass
             if force_exit_timer is None:
-                force_exit_timer = threading.Timer(2.5, lambda: os._exit(0))
+                force_exit_timer = threading.Timer(8.0, _force_exit)
                 force_exit_timer.daemon = True
                 force_exit_timer.start()
 
-        menu = Menu(
-            MenuItem("Control Panel", open_control_panel),
-            MenuItem("OCR once now", ocr_once),
-            MenuItem("Refresh status", refresh),
-            MenuItem("Exit", quit_app),
-        )
+        def open_control_panel(_icon, _item) -> None:
+            popup_manager.open_panel()
+
+        def toggle_watcher(_icon, item) -> None:
+            if self.app.is_running:
+                logger.info("Stopping watcher from tray menu")
+                try:
+                    self.app.stop()
+                except Exception as exc:
+                    logger.exception("Error stopping watcher: %s", exc)
+            else:
+                logger.info("Starting watcher from tray menu")
+                try:
+                    self.app.start()
+                except Exception as exc:
+                    logger.exception("Error starting watcher: %s", exc)
+            icon.title = show_status()
+
+        def toggle_isolate_mode(_icon, item) -> None:
+            new_mode = not self.app.isolate_mode
+            logger.info("Toggling isolate_mode to %s from tray menu", new_mode)
+            try:
+                was_running = self.app.is_running
+                if was_running:
+                    self.app.stop()
+                self.app.restart_watcher(isolate_mode=new_mode)
+            except Exception as exc:
+                logger.exception("Error toggling isolate mode: %s", exc)
+            icon.title = show_status()
+
+        def toggle_startup(_icon, item) -> None:
+            current = is_startup_enabled()
+            new_state = not current
+            logger.info("Toggling startup enabled to %s from tray menu", new_state)
+            try:
+                set_startup_enabled(new_state)
+            except Exception as exc:
+                logger.exception("Error toggling startup: %s", exc)
+
+        def open_runtime_terminal(_icon, _item) -> None:
+            log_path = private_cfg.get("log_file")
+            try:
+                _open_runtime_terminal(self.app.script_path, log_path)
+            except Exception as exc:
+                logger.exception("Error opening runtime terminal: %s", exc)
+
+        def open_config_folder(_icon, _item) -> None:
+            config_dir = get_config_dir()
+            resolved_dir = config_dir.resolve()
+            if ".." in config_dir.parts:
+                logger.warning("Config dir contains path traversal, refusing to open: %s", config_dir)
+                return
+            if sys.platform == "win32":
+                import subprocess
+                subprocess.Popen(["explorer.exe", str(resolved_dir)])
+            elif sys.platform == "darwin":
+                import subprocess
+                subprocess.Popen(["open", str(resolved_dir)])
+            else:
+                import subprocess
+                import os
+                subprocess.Popen(["xdg-open", str(resolved_dir)])
+
+        def show_about(_icon, _item) -> None:
+            from . import __version__
+            title = t("tray_about_title", version=__version__)
+            mode_str = t("tray_mode_isolated") if self.app.isolate_mode else t("tray_mode_watching")
+            message = t(
+                "tray_about_message",
+                version=__version__,
+                mode=mode_str,
+                script=self.app.script_path.name,
+                interval=self.app.interval,
+            )
+            popup_manager.show_popup(title, message, timeout_ms=8000)
+
+        def _build_script_menu_items() -> list:
+            items: list = []
+            for entry in self.app.registry.get_enabled_scripts():
+                try:
+                    tray_items = entry.script.get_tray_menu_items()
+                except Exception:
+                    logger.exception("Failed to get tray menu items from script %s", entry.script.name)
+                    tray_items = []
+                for ti in tray_items:
+                    try:
+                        pystray_item = _convert_tray_menu_item(ti)
+                        if pystray_item is not None:
+                            items.append(pystray_item)
+                    except Exception:
+                        logger.exception("Failed to convert tray menu item from script %s", entry.script.name)
+            return items
+
+        def _convert_tray_menu_item(ti):
+            if ti.separator:
+                return Menu.SEPARATOR
+
+            label = ti.label() if callable(ti.label) else ti.label
+            if not label:
+                return None
+
+            if ti.items is not None:
+                sub_items = []
+                for sub in ti.items:
+                    converted = _convert_tray_menu_item(sub)
+                    if converted is not None:
+                        sub_items.append(converted)
+                return MenuItem(label, Menu(*sub_items))
+
+            if ti.action is not None:
+                def _make_action(action=ti.action):
+                    def _on_menu_click(_icon, _item):
+                        try:
+                            action()
+                        except Exception:
+                            logger.exception("Error in tray menu action")
+                    return _on_menu_click
+
+                kwargs = {}
+                if ti.checked is not None:
+                    kwargs["checked"] = ti.checked
+                if ti.enabled is not True:
+                    kwargs["enabled"] = ti.enabled
+                return MenuItem(label, _make_action(ti.action), **kwargs)
+
+            return MenuItem(label, lambda _icon, _item: None)
+
+        script_menu_items = _build_script_menu_items()
+
+        menu_items = [
+            MenuItem(t("tray_control_panel"), open_control_panel),
+            Menu.SEPARATOR,
+            MenuItem(t("tray_start_stop_watcher"), toggle_watcher),
+            MenuItem(t("tray_isolate_mode"), toggle_isolate_mode, checked=lambda item: self.app.isolate_mode),
+            Menu.SEPARATOR,
+            MenuItem(t("tray_ocr_once"), ocr_once),
+            MenuItem(t("tray_refresh_status"), refresh),
+            Menu.SEPARATOR,
+            MenuItem(t("tray_open_terminal"), open_runtime_terminal),
+            MenuItem(t("tray_open_config_folder"), open_config_folder),
+            MenuItem(t("tray_startup_windows"), toggle_startup, checked=lambda item: is_startup_enabled()),
+            Menu.SEPARATOR,
+        ]
+        if script_menu_items:
+            menu_items.extend(script_menu_items)
+            menu_items.append(Menu.SEPARATOR)
+        menu_items.append(MenuItem(t("tray_about"), show_about))
+        menu_items.append(MenuItem(t("tray_exit"), quit_app))
+
+        menu = Menu(*menu_items)
         icon = pystray.Icon("PLatexClient", _build_icon_image(), self._limit_title(show_status()), menu)
         self.app.on_ocr_success = notify_success
-        self.app.start()
-        if startup_script_configs:
+
+        def _rebuild_tray_menu() -> None:
+            new_menu_items = [
+                MenuItem(t("tray_control_panel"), open_control_panel),
+                Menu.SEPARATOR,
+                MenuItem(t("tray_start_stop_watcher"), toggle_watcher),
+                MenuItem(t("tray_isolate_mode"), toggle_isolate_mode, checked=lambda item: self.app.isolate_mode),
+                Menu.SEPARATOR,
+                MenuItem(t("tray_ocr_once"), ocr_once),
+                MenuItem(t("tray_refresh_status"), refresh),
+                Menu.SEPARATOR,
+                MenuItem(t("tray_open_terminal"), open_runtime_terminal),
+                MenuItem(t("tray_open_config_folder"), open_config_folder),
+                MenuItem(t("tray_startup_windows"), toggle_startup, checked=lambda item: is_startup_enabled()),
+                Menu.SEPARATOR,
+            ]
+            if script_menu_items:
+                new_menu_items.extend(script_menu_items)
+                new_menu_items.append(Menu.SEPARATOR)
+            new_menu_items.append(MenuItem(t("tray_about"), show_about))
+            new_menu_items.append(MenuItem(t("tray_exit"), quit_app))
+
+            new_menu = Menu(*new_menu_items)
+            icon.menu = new_menu
+            icon.title = self._limit_title(show_status())
+
+        on_language_changed(lambda lang: _rebuild_tray_menu())
+
+        logger.info("Starting PlatexApp")
+        self.app.start(script_configs=startup_script_configs or None)
+        logger.info("PlatexApp started successfully")
+
+        if not startup_script_configs:
             try:
-                # Registry entries are created during app.start(); apply persisted script configs afterwards.
-                self.app.registry.load_configs(startup_script_configs)
-                self.app.apply_registry_hotkeys()
-                logger.info("Applied persisted script configs on startup: %d", len(startup_script_configs))
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Failed to apply persisted script configs on startup: %s", exc)
+                script_configs = self.app.registry.save_configs()
+                if script_configs:
+                    _ensure_scripts_in_config(script_configs)
+            except Exception:
+                logger.debug("Failed to save initial script configs", exc_info=True)
 
         def _tray_loop() -> None:
             try:
                 icon.run()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.exception("Error in tray loop thread: %s", exc)
-                _request_shutdown()
+                popup_manager.request_shutdown()
 
+        logger.info("Starting tray thread")
         tray_thread = threading.Thread(target=_tray_loop, name="platex-pystray-loop", daemon=True)
         tray_thread.start()
+        logger.info("Tray thread started, calling popup_loop()")
 
         try:
             popup_loop()
         except KeyboardInterrupt:
             logger.info("Tray interrupted by keyboard")
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception("Error in tray main loop: %s", exc)
         finally:
-            _request_shutdown()
+            popup_manager.request_shutdown()
+            try:
+                from PyQt6.QtWidgets import QApplication
+                qt_app = QApplication.instance()
+                if qt_app is not None:
+                    qt_app.quit()
+            except Exception:
+                pass
             try:
                 icon.stop()
             except Exception:
@@ -1169,8 +687,19 @@ class TrayController:
             signal.signal(signal.SIGINT, previous_sigint_handler)
             if panel_event_handle is not None:
                 try:
-                    _kernel32.CloseHandle(panel_event_handle)
+                    KERNEL32.CloseHandle(panel_event_handle)
                 except Exception:
                     pass
-            self.app.stop()
+            try:
+                self.app.stop()
+            except Exception:
+                logger.exception("Error stopping app during tray shutdown")
+            try:
+                self.history.close()
+            except Exception:
+                pass
+            try:
+                release_single_instance_lock()
+            except Exception:
+                pass
         return 0

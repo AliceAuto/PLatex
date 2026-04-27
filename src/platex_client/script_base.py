@@ -1,26 +1,36 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from PyQt6.QtWidgets import QWidget
+    from collections.abc import Callable
+
+
+@dataclass
+class TrayMenuItem:
+    label: str | Callable[[], str] = ""
+    action: Callable[[], None] | None = None
+    items: list[TrayMenuItem] | None = None
+    checked: None | bool | Callable[[], bool] = None
+    enabled: bool | Callable[[], bool] = True
+    separator: bool = False
 
 
 class ScriptBase(ABC):
-    """Base class for all PLatex scripts.
+    """Base class for all PLatex scripts."""
 
-    Each script can optionally:
-    - Provide a settings UI widget (create_settings_widget)
-    - Register global hotkeys (get_hotkey_bindings / on_hotkey)
-    - Process clipboard images (has_ocr_capability / process_image)
-    - Persist its own configuration (load_config / save_config)
-    """
+    def __init__(self) -> None:
+        self._context: Any | None = None
+        self._hotkeys_changed_callback: Callable[[], None] | None = None
+        self._tray_action_callback: Any | None = None
 
     @property
     @abstractmethod
     def name(self) -> str:
-        """Unique identifier for this script (used in config and registry)."""
+        """Unique identifier for this script."""
 
     @property
     @abstractmethod
@@ -32,49 +42,70 @@ class ScriptBase(ABC):
     def description(self) -> str:
         """Short description of what this script does."""
 
-    def create_settings_widget(self, parent: QWidget | None = None) -> QWidget | None:
-        """Create and return a QWidget for this script's settings page.
+    @property
+    def context(self) -> Any | None:
+        return self._context
 
-        The returned widget will be placed inside a tab in the Control Panel.
-        Return None if the script has no settings UI.
-        """
+    def on_context_ready(self, context: Any) -> None:
+        self._context = context
+
+    def create_settings_widget(self, parent: QWidget | None = None) -> QWidget | None:
         return None
 
     def get_hotkey_bindings(self) -> dict[str, str]:
-        """Return hotkey bindings as {hotkey_str: action_name}.
-
-        hotkey_str uses human-friendly format: "Ctrl+Alt+1", "Ctrl+Shift+F5".
-        The on_hotkey method will be called with the corresponding action_name
-        when the hotkey is triggered.
-        """
         return {}
 
     def on_hotkey(self, action: str) -> None:
-        """Called when a registered hotkey is triggered."""
+        pass
+
+    def set_hotkeys_changed_callback(self, callback: Callable[[], None] | None) -> None:
+        self._hotkeys_changed_callback = callback
+
+    def _notify_hotkeys_changed(self) -> None:
+        cb = self._hotkeys_changed_callback
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                import logging
+                logging.getLogger("platex.script_base").exception("Error in hotkeys changed callback")
 
     def activate(self) -> None:
-        """Called when the script is activated (started)."""
+        pass
 
     def deactivate(self) -> None:
-        """Called when the script is deactivated (stopped)."""
+        if self._context is not None:
+            try:
+                self._context.shutdown()
+            except Exception:
+                pass
+            self._context = None
 
     def load_config(self, config: dict[str, Any]) -> None:
-        """Load script-specific configuration from a dict."""
+        pass
 
     def save_config(self) -> dict[str, Any]:
-        """Return script-specific configuration as a dict for persistence."""
         return {}
 
-    def import_config(self, path: Any) -> dict[str, Any]:
-        """Import configuration from a file path. Returns the loaded config dict.
-
-        Default implementation loads YAML. Scripts can override for custom formats.
-        """
-        import yaml
+    @staticmethod
+    def _validate_config_path(path: Any) -> Path:
         from pathlib import Path
         p = Path(path) if not isinstance(path, Path) else path
+        if ".." in p.parts:
+            raise ValueError(f"Config path contains '..' segments (path traversal rejected): {p}")
+        resolved = p.resolve()
+        if p.is_symlink():
+            raise ValueError(f"Config path is a symlink (not allowed): {p} -> {resolved}")
+        return resolved
+
+    def import_config(self, path: Any) -> dict[str, Any]:
+        import yaml
+        from pathlib import Path
+        p = self._validate_config_path(path)
         if not p.exists():
             raise FileNotFoundError(f"Config file not found: {p}")
+        if not p.is_file():
+            raise ValueError(f"Config path is not a regular file: {p}")
         imported = yaml.safe_load(p.read_text(encoding="utf-8"))
         if imported is None:
             return {}
@@ -84,27 +115,27 @@ class ScriptBase(ABC):
         return imported
 
     def export_config(self, path: Any) -> None:
-        """Export configuration to a file path.
-
-        Default implementation saves as YAML. Scripts can override for custom formats.
-        """
         import yaml
         from pathlib import Path
-        p = Path(path) if not isinstance(path, Path) else path
+        p = self._validate_config_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         config = self.save_config()
         config["__script_name__"] = self.name
         p.write_text(yaml.safe_dump(config, sort_keys=False, allow_unicode=True, default_flow_style=False), encoding="utf-8")
 
     def has_ocr_capability(self) -> bool:
-        """Whether this script can process clipboard images (OCR)."""
         return False
 
     def process_image(self, image_bytes: bytes, context: dict[str, object] | None = None) -> str:
-        """Process a clipboard image and return LaTeX text.
-
-        Only called when has_ocr_capability() returns True.
-        """
         if self.has_ocr_capability():
             raise NotImplementedError(f"{self.name} must implement process_image()")
         raise RuntimeError(f"Script {self.name} does not have OCR capability")
+
+    def get_tray_menu_items(self) -> list[TrayMenuItem]:
+        return []
+
+    def set_tray_action_callback(self, callback: Any | None) -> None:
+        self._tray_action_callback = callback
+
+    def test_connection(self) -> tuple[bool, str]:
+        return True, "OK"

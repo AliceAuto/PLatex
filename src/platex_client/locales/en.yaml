@@ -1,0 +1,109 @@
+window_title: "PLatex Control Panel"
+
+tab_general: General
+tab_log: Log
+
+btn_save: "Save & Apply"
+btn_terminal: "Open Terminal"
+btn_close: Close
+btn_change: Change
+btn_refresh: Refresh
+btn_export_all: "Export All Config"
+btn_import_all: "Import All Config"
+btn_export_config: "Export Config"
+btn_import_config: "Import Config"
+
+label_auto_start: "Auto Start"
+label_language: "UI Language"
+label_config_dir: "Config Directory"
+label_display: Display
+label_hotkey_status: "Hotkey Status"
+
+msg_loading: "Loading..."
+msg_hotkey_cannot_get: "Cannot get hotkey status: {error}"
+msg_backend: "Backend: {backend}"
+msg_running: "Status: Running | Registered: {count} bindings"
+msg_stopped: "Status: Stopped"
+msg_registered: "Registered: {bindings}"
+msg_all_hotkeys_ok: "<span style='color: #8cc490;'>✓ All hotkeys working</span>"
+msg_no_hotkeys: "<span style='color: #d4787e;'>⚠ No hotkeys registered</span>"
+msg_register_failed: "<span style='color: #d4787e;'>✗ Registration failed (occupied by other apps): {items}</span>"
+msg_resolve_tip: "<span style='color: #8a90a8; font-size: 11px;'>💡 Solution: Close the app occupying the hotkey, then click 'Save & Apply' to retry.</span>"
+msg_no_conflict: "<span style='color: #8cc490;'>No conflicts</span>"
+
+backend_win32: "Win32 API (Recommended)"
+backend_pynput: "pynput (Fallback)"
+backend_none: None
+
+dialog_select_config_dir: "Select Config Directory"
+dialog_export_config: "Export All Config"
+dialog_import_config: "Import All Config"
+dialog_export_script: "Export {name} Config"
+dialog_import_script: "Import {name} Config"
+dialog_yaml_filter: "YAML Files (*.yaml *.yml);;All Files (*)"
+
+msg_config_dir_changed: "Config directory changed"
+msg_config_dir_changed_text: "Config directory set to:\n{path}\n\nTo migrate existing config, manually copy files from old directory.\nRestart to apply."
+msg_change_failed: "Change Failed"
+msg_export_success: "Export Successful"
+msg_export_success_text: "Config exported to:\n{path}"
+msg_export_failed: "Export Failed"
+msg_import_success: "Import Successful"
+msg_import_success_text: "Config imported. Please review and click 'Save & Apply'."
+msg_import_failed: "Import Failed"
+msg_script_import_success: "Import Successful"
+msg_script_import_success_text: "{name} config imported."
+msg_script_import_failed: "Import Failed"
+msg_script_export_success: "Export Successful"
+msg_script_export_success_text: "Config exported to:\n{path}"
+msg_script_export_failed: "Export Failed"
+
+btn_show_yaml: "▶ Show Config (YAML)"
+btn_hide_yaml: "▼ Hide Config (YAML)"
+
+yaml_parse_error: "YAML top level must be an object (key: value)."
+yaml_parse_failed: "YAML Parse Error"
+msg_invalid_path: "Invalid Path"
+msg_invalid_path_text: "Script path in YAML does not exist."
+msg_invalid_config: "Invalid Config"
+msg_invalid_interval: "Interval in YAML must be a number."
+msg_auto_start_failed: "Auto Start Failed"
+msg_save_failed: "Save Failed"
+msg_apply_failed: "Apply Failed"
+msg_saved: Saved
+msg_saved_text: "YAML config saved and applied."
+
+log_auto_refresh: "Auto Refresh"
+log_open_terminal: "Open Terminal"
+log_file_not_found: "Log file not found: {path}"
+log_read_error: "Failed to read log: {error}"
+
+line_50: "50 lines"
+line_100: "100 lines"
+line_200: "200 lines"
+line_500: "500 lines"
+
+tray_control_panel: "Control Panel"
+tray_start_stop_watcher: "Start/Stop Watcher"
+tray_isolate_mode: "Isolate Mode"
+tray_ocr_once: "OCR once now"
+tray_refresh_status: "Refresh status"
+tray_open_terminal: "Open Runtime Terminal"
+tray_open_config_folder: "Open Config Folder"
+tray_startup_windows: "Startup with Windows"
+tray_about: "About PLatex"
+tray_exit: Exit
+
+tray_popup_click_to_copy: "\n\nClick this popup to copy to clipboard."
+tray_ocr_completed: "OCR completed"
+
+tray_about_title: "PLatex Client v{version}"
+tray_about_message: "Version: {version}\nMode: {mode}\nScript: {script}\nInterval: {interval}s\n\nPLatex - LaTeX OCR Clipboard Tool"
+tray_mode_watching: Watching
+tray_mode_isolated: Isolated
+
+tray_status_waiting: "PLatex Client | {mode} | waiting for clipboard image"
+tray_status_latest: "PLatex Client | {mode} | latest {hash}"
+tray_status_error: "PLatex Client | {mode} | last error {error}"
+
+tray_ocr_success_title: "PLatex OCR Success"

@@ -10,17 +10,70 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from urllib.parse import urlparse
+
 from platex_client.script_base import ScriptBase
 
 logger = logging.getLogger("platex.scripts.ocr")
 
-_MAX_IMAGE_BYTES = 10 * 1024 * 1024  # 10 MB
+_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+
+_ALLOWED_URL_SCHEMES = {"https", "http"}
+_ALLOWED_URL_HOSTNAMES = {
+    "open.bigmodel.cn",
+    "bigmodel.cn",
+    "api.bigmodel.cn",
+    "api.zhipuai.com",
+    "open.zhipuai.com",
+}
+
+
+def _validate_base_url(url: str) -> str:
+    url = url.strip()
+    if not url:
+        return "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+
+    parsed = urlparse(url)
+    if parsed.scheme not in _ALLOWED_URL_SCHEMES:
+        raise ValueError(
+            f"Invalid base_url scheme '{parsed.scheme}': only https and http are allowed. "
+            f"Got: {url}"
+        )
+    if not parsed.hostname:
+        raise ValueError(f"Invalid base_url (no hostname): {url}")
+    hostname_lower = parsed.hostname.lower()
+    is_allowed = any(
+        hostname_lower == allowed or hostname_lower.endswith("." + allowed)
+        for allowed in _ALLOWED_URL_HOSTNAMES
+    )
+    if not is_allowed and hostname_lower not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError(
+            f"base_url hostname '{parsed.hostname}' is not in the allowed list. "
+            f"Allowed: {', '.join(sorted(_ALLOWED_URL_HOSTNAMES))}. "
+            f"If you need to use a custom endpoint, add it to _ALLOWED_URL_HOSTNAMES."
+        )
+    if parsed.scheme != "https" and hostname_lower not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError(
+            f"base_url uses insecure http scheme for host '{parsed.hostname}'. "
+            f"API keys would be sent in cleartext. Use https instead."
+        )
+    return url
+
 
 _VISION_MODELS = {
     "glm-4v", "glm-4v-plus", "glm-4v-flash",
     "glm-4.1v", "glm-4.1v-thinking", "glm-4.1v-thinking-flash",
     "glm-4.1v-flash", "glm-4.1v-plus",
 }
+
+
+def _sanitize_response_for_log(data: dict | str, max_len: int = 200) -> str:
+    raw = json.dumps(data, ensure_ascii=False) if isinstance(data, dict) else str(data)
+    api_key_pattern = re.compile(r'(api[_-]?key|token|secret|authorization)["\s:=]+(["\w\-]{8})["\w\-]*', re.IGNORECASE)
+    raw = api_key_pattern.sub(r'\1=***REDACTED***', raw)
+    if len(raw) > max_len:
+        raw = raw[:max_len] + "..."
+    return raw
 
 
 def _extract_latex(content: object) -> str:
@@ -37,10 +90,18 @@ def _extract_latex(content: object) -> str:
     return ""
 
 
+def _sanitize_error_detail(text: str, max_len: int = 200) -> str:
+    sanitized = text[:max_len]
+    sanitized = re.sub(r'(Bearer\s+)[A-Za-z0-9_\-.]+', r'\1***', sanitized)
+    sanitized = re.sub(r'(api[_-]?key["\s:=]+)["\w\-.]+', r'\1***', sanitized)
+    return sanitized
+
+
 class OcrScript(ScriptBase):
     """GLM Vision OCR script: captures clipboard images and extracts LaTeX."""
 
     def __init__(self) -> None:
+        super().__init__()
         self._api_key: str | None = None
         self._model: str = "glm-4.1v-thinking-flash"
         self._base_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
@@ -61,26 +122,31 @@ class OcrScript(ScriptBase):
         return True
 
     def load_config(self, config: dict[str, Any]) -> None:
+        from platex_client.secrets import get_secret
         api_key_val = config.get("api_key", "")
-        # Ignore masked placeholders (e.g. "sk-ab****")
         if api_key_val and not re.match(r"^.{1,4}\*+$", api_key_val):
             self._api_key = api_key_val
-        elif os.getenv("GLM_API_KEY"):
-            self._api_key = os.getenv("GLM_API_KEY")
+        else:
+            secret_key = get_secret("GLM_API_KEY") or os.getenv("GLM_API_KEY")
+            if secret_key:
+                self._api_key = secret_key
         if config.get("model"):
             self._model = config["model"]
-        elif os.getenv("GLM_MODEL"):
-            self._model = os.getenv("GLM_MODEL", self._model)
+        else:
+            secret_model = get_secret("GLM_MODEL") or os.getenv("GLM_MODEL")
+            if secret_model:
+                self._model = secret_model
         if config.get("base_url"):
-            self._base_url = config["base_url"]
-        elif os.getenv("GLM_BASE_URL"):
-            self._base_url = os.getenv("GLM_BASE_URL", self._base_url)
+            self._base_url = _validate_base_url(config["base_url"])
+        else:
+            secret_url = get_secret("GLM_BASE_URL") or os.getenv("GLM_BASE_URL")
+            if secret_url:
+                self._base_url = _validate_base_url(secret_url)
 
     def save_config(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        # Save real api_key for persistence (will be hidden in YAML preview)
         if self._api_key:
-            result["api_key"] = self._api_key
+            result["api_key"] = "********"
         result["model"] = self._model
         result["base_url"] = self._base_url
         return result
@@ -119,10 +185,13 @@ class OcrScript(ScriptBase):
             img.save(buf, **kwargs)
             return buf.getvalue(), save_fmt
         except Exception:
-            return image_bytes, "PNG"
+            if len(image_bytes) <= _MAX_IMAGE_BYTES:
+                return image_bytes, "PNG"
+            raise RuntimeError(f"Image is too large ({len(image_bytes)} bytes) and could not be resized")
 
     def process_image(self, image_bytes: bytes, context: dict[str, object] | None = None) -> str:
-        api_key = self._api_key or os.getenv("GLM_API_KEY")
+        from platex_client.secrets import get_secret
+        api_key = self._api_key or get_secret("GLM_API_KEY") or os.getenv("GLM_API_KEY")
         if not api_key:
             raise RuntimeError("Please set GLM_API_KEY before starting the client.")
 
@@ -176,7 +245,7 @@ class OcrScript(ScriptBase):
                     f"Please switch to a vision model (e.g. glm-4.1v-thinking-flash) "
                     f"in the OCR settings tab."
                 ) from exc
-            raise RuntimeError(f"GLM HTTP error {exc.code}: {error_body}") from exc
+            raise RuntimeError(f"GLM HTTP error {exc.code}: {_sanitize_error_detail(error_body)}") from exc
         except URLError as exc:
             raise RuntimeError(f"GLM request failed: {exc.reason}") from exc
         except (TimeoutError, ConnectionError, OSError) as exc:
@@ -185,22 +254,22 @@ class OcrScript(ScriptBase):
         try:
             data = json.loads(response_body)
         except json.JSONDecodeError as exc:
-            raise RuntimeError(f"GLM returned invalid JSON (first 200 chars: {response_body[:200]}): {exc}") from exc
+            raise RuntimeError(f"GLM returned invalid JSON: {exc}") from exc
         choices = data.get("choices")
         if not isinstance(choices, list) or not choices:
             error_msg = str(data.get("error", data.get("message", "")))
-            if "does not support image" in error_msg or "not support" in error_msg.lower() and "image" in error_msg.lower():
+            if "does not support image" in error_msg or ("not support" in error_msg.lower() and "image" in error_msg.lower()):
                 raise RuntimeError(
                     f"Model '{model}' does not support image input. "
                     f"Please switch to a vision model (e.g. glm-4.1v-thinking-flash) "
                     f"in the OCR settings tab."
                 )
-            raise RuntimeError(f"GLM returned invalid response: {json.dumps(data, ensure_ascii=False)}")
+            raise RuntimeError(f"GLM returned invalid response: {_sanitize_response_for_log(data)}")
 
         message = choices[0].get("message", {})
         latex = _extract_latex(message.get("content"))
         if not latex:
-            raise RuntimeError(f"GLM returned no usable OCR result: {json.dumps(data, ensure_ascii=False)}")
+            raise RuntimeError(f"GLM returned no usable OCR result: {_sanitize_response_for_log(data)}")
 
         return latex
 
@@ -244,7 +313,7 @@ class OcrScript(ScriptBase):
                 layout.addWidget(self._model_edit)
 
                 self._model_warning = QLabel("")
-                self._model_warning.setStyleSheet("color: #cc3333; font-size: 12px;")
+                self._model_warning.setStyleSheet("color: #d4787e; font-size: 12px;")
                 self._model_warning.setWordWrap(True)
                 layout.addWidget(self._model_warning)
                 self._model_edit.textChanged.connect(self._check_model)
@@ -269,15 +338,17 @@ class OcrScript(ScriptBase):
                     self._model_warning.setText("")
 
             def save_settings(self) -> None:
+                from platex_client.secrets import set_secret
                 script_ref._api_key = self._api_key_edit.text().strip() or None
                 script_ref._model = self._model_edit.text().strip() or "glm-4.1v-thinking-flash"
-                script_ref._base_url = self._base_url_edit.text().strip() or "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+                base_url_val = self._base_url_edit.text().strip() or "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+                script_ref._base_url = _validate_base_url(base_url_val)
                 if script_ref._api_key:
-                    os.environ["GLM_API_KEY"] = script_ref._api_key
+                    set_secret("GLM_API_KEY", script_ref._api_key)
                 if script_ref._model:
-                    os.environ["GLM_MODEL"] = script_ref._model
+                    set_secret("GLM_MODEL", script_ref._model)
                 if script_ref._base_url:
-                    os.environ["GLM_BASE_URL"] = script_ref._base_url
+                    set_secret("GLM_BASE_URL", script_ref._base_url)
 
         return _OcrSettingsWidget(parent)
 

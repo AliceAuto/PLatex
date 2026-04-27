@@ -1,20 +1,32 @@
-glm_api_key: YOUR_API_KEY_HERE
+# PLatex Client 配置文件
+# 完整字段参考：https://github.com/AliceAuto/PLatex#配置
+
+# ── 配置版本（请勿手动修改，由程序自动管理）──────────
+config_version: 2
+
+# ── GLM API 配置 ──────────────────────────────────
+glm_api_key: YOUR_API_KEY_HERE   # 建议用环境变量 GLM_API_KEY 替代，不写入 YAML
 glm_model: glm-4.1v-thinking-flash
 glm_base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
-isolate_mode: false
-interval: 0.8
-auto_start: true
-ui_language: en
+
+# ── 通用设置 ──────────────────────────────────────
+isolate_mode: false              # true 则禁用后台轮询，仅手动触发 OCR
+interval: 0.8                    # 剪贴板轮询间隔（秒），最小 0.1
+auto_start: false                # 开机自启动
+ui_language: en                  # UI 语言
+language_pack: ""                # 自定义语言包路径
+
+# ── 脚本配置 ──────────────────────────────────────
 scripts:
   glm_vision_ocr:
     model: glm-4.1v-thinking-flash
     base_url: https://open.bigmodel.cn/api/paas/v4/chat/completions
     enabled: true
   hotkey_click:
-    entries:
-    - hotkey: Ctrl+Shift+E
-      x: 552
-      y: 939
-      button: left
-      remark: r
     enabled: true
+    entries:
+      - hotkey: Ctrl+Alt+1
+        x: 500
+        y: 300
+        button: left
+        remark: 示例

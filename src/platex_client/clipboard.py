@@ -15,6 +15,7 @@ from .windows_clipboard import _clipboard_lock, set_text
 logger = logging.getLogger("platex.clipboard")
 
 _MAX_IMAGE_SIZE = 20 * 1024 * 1024
+_MAX_IMAGE_DIMENSION = 16384
 
 
 def grab_image_clipboard() -> ClipboardImage | None:
@@ -32,6 +33,13 @@ def grab_image_clipboard() -> ClipboardImage | None:
             image_bytes = buffer.getvalue()
             if len(image_bytes) > _MAX_IMAGE_SIZE:
                 logger.warning("Clipboard image too large (%d bytes), skipping", len(image_bytes))
+                return None
+
+            if content.width > _MAX_IMAGE_DIMENSION or content.height > _MAX_IMAGE_DIMENSION:
+                logger.warning(
+                    "Clipboard image dimensions too large (%dx%d, max %d), skipping",
+                    content.width, content.height, _MAX_IMAGE_DIMENSION,
+                )
                 return None
 
             return ClipboardImage(image_bytes=image_bytes, width=content.width, height=content.height)

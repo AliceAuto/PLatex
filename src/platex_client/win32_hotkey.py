@@ -7,56 +7,58 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from .platform_utils import IS_WINDOWS, KERNEL32, USER32
+from .win32_utils import register_window_class, create_message_window, destroy_message_window
+
 logger = logging.getLogger("platex.win32_hotkey")
 
-_IS_WINDOWS = False
-_USER32: Any = None
-_KERNEL32: Any = None
-
-try:
-    import ctypes
+if IS_WINDOWS:
     from ctypes import wintypes
 
-    _USER32 = ctypes.windll.user32
-    _KERNEL32 = ctypes.windll.kernel32
-    _IS_WINDOWS = True
-except (ImportError, OSError):
-    pass
-
-# Win32 constants
 WM_HOTKEY = 0x0312
+_WM_USER_STOP = 0x0401
+_WM_USER_REGISTER = 0x0402
+_WM_USER_UNREGISTER = 0x0403
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
 MOD_WIN = 0x0008
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
+ERROR_CLASS_ALREADY_EXISTS = 1410
+
+_MAX_RETRY_COUNT = 10
+_MAX_RETRY_DELAY = 30.0
+
+_instance_counter = 0
+_instance_lock = threading.Lock()
 
 
 class Win32HotkeyListener:
-    """Windows-native global hotkey listener using RegisterHotKey.
-
-    More reliable than pynput for global hotkeys on Windows because:
-    1. Explicit error codes when registration fails (e.g., already registered)
-    2. System-level message handling - not affected by other hook-based tools
-    3. Automatic recovery when conflicting apps exit
-    """
 
     def __init__(self) -> None:
+        global _instance_counter
+        with _instance_lock:
+            _instance_counter += 1
+            self._instance_id = _instance_counter
+
         self._callbacks: dict[int, Callable[[], None]] = {}
         self._hotkey_to_id: dict[str, int] = {}
         self._next_id = 1
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
-        self._hwnd: wintypes.HWND | None = None
-        self._failed_hotkeys: dict[str, int] = {}  # hotkey -> retry count
+        self._hwnd: Any = None
+        self._failed_hotkeys: dict[str, int] = {}
         self._retry_timer: threading.Timer | None = None
+        self._pending: dict[str, tuple[int, int, int, Callable[[], None]]] = {}
+        self._pending_unregisters: list[int] = []
+        self._ready_event = threading.Event()
+        self._wnd_proc_ref: Any = None
+        self._wndproc_type: Any = None
+
+    _MODIFIER_NAMES = {"ctrl", "control", "alt", "shift", "win", "cmd", "super"}
 
     def _parse_hotkey(self, hotkey: str) -> tuple[int, int] | None:
-        """Parse human-friendly hotkey to (modifiers, vk_code).
-
-        Returns None if parsing fails or key is unsupported.
-        """
         parts = hotkey.lower().replace("<", "").replace(">", "").split("+")
         parts = [p.strip() for p in parts if p.strip()]
         if not parts:
@@ -64,6 +66,10 @@ class Win32HotkeyListener:
 
         modifiers = 0
         key_part = parts[-1]
+
+        if key_part in self._MODIFIER_NAMES:
+            logger.warning("Bare modifier '%s' in hotkey '%s' is not a valid hotkey (needs a key)", key_part, hotkey)
+            return None
 
         for mod in parts[:-1]:
             if mod in ("ctrl", "control"):
@@ -75,7 +81,6 @@ class Win32HotkeyListener:
             elif mod in ("win", "cmd", "super"):
                 modifiers |= MOD_WIN
 
-        # Virtual key codes
         vk_map = {
             "0": 0x30, "1": 0x31, "2": 0x32, "3": 0x33, "4": 0x34,
             "5": 0x35, "6": 0x36, "7": 0x37, "8": 0x38, "9": 0x39,
@@ -91,23 +96,37 @@ class Win32HotkeyListener:
             "f16": 0x7F, "f17": 0x80, "f18": 0x81, "f19": 0x82, "f20": 0x83,
             "f21": 0x84, "f22": 0x85, "f23": 0x86, "f24": 0x87,
             "space": 0x20, "enter": 0x0D, "return": 0x0D, "tab": 0x09,
+            "backtab": 0x09,
             "escape": 0x1B, "esc": 0x1B, "backspace": 0x08, "delete": 0x2E,
-            "insert": 0x2D, "home": 0x24, "end": 0x23, "page_up": 0x21,
-            "page_down": 0x22, "up": 0x26, "down": 0x28, "left": 0x25,
-            "right": 0x27, "caps_lock": 0x14,
-            "print_screen": 0x2C, "scroll_lock": 0x91, "pause": 0x13,
-            "numlock": 0x90, "numpad0": 0x60, "numpad1": 0x61, "numpad2": 0x62,
+            "del": 0x2E, "insert": 0x2D, "ins": 0x2D, "home": 0x24, "end": 0x23,
+            "page_up": 0x21, "prior": 0x21, "pgup": 0x21,
+            "page_down": 0x22, "next": 0x22, "pgdown": 0x22, "pgdn": 0x22,
+            "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+            "caps_lock": 0x14, "capslock": 0x14,
+            "print_screen": 0x2C, "sysrq": 0x2C, "prtsc": 0x2C,
+            "scroll_lock": 0x91, "scrolllock": 0x91,
+            "pause": 0x13, "break": 0x13,
+            "num_lock": 0x90, "numlock": 0x90,
+            "menu": 0x5D, "help": 0x2F, "clear": 0x0C, "print": 0x2C,
+            "numpad0": 0x60, "numpad1": 0x61, "numpad2": 0x62,
             "numpad3": 0x63, "numpad4": 0x64, "numpad5": 0x65, "numpad6": 0x66,
             "numpad7": 0x67, "numpad8": 0x68, "numpad9": 0x69,
             "multiply": 0x6A, "add": 0x6B, "separator": 0x6C, "subtract": 0x6D,
             "decimal": 0x6E, "divide": 0x6F,
+            "volume_down": 0xAE, "volume_mute": 0xAD, "volume_up": 0xAF,
+            "media_next": 0xB0, "media_prev": 0xB1, "media_stop": 0xB2,
+            "media_play_pause": 0xB3, "media_play": 0xB3,
+            "launch_mail": 0xB4, "launch_media": 0xB5,
+            "browser_back": 0xA6, "browser_forward": 0xA7,
+            "browser_refresh": 0xA8, "browser_stop": 0xA9,
+            "browser_search": 0xAA, "browser_favorites": 0xAB,
+            "browser_home": 0xAC,
             ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF,
             "`": 0xC0, "[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE,
         }
 
         vk = vk_map.get(key_part)
         if vk is None:
-            # Single character fallback
             if len(key_part) == 1:
                 vk = ord(key_part.upper())
             else:
@@ -117,12 +136,10 @@ class Win32HotkeyListener:
         return modifiers, vk
 
     def register(self, hotkey: str, callback: Callable[[], None]) -> bool:
-        """Register a global hotkey. Returns True on success."""
-        if not _IS_WINDOWS or _USER32 is None:
+        if not IS_WINDOWS or USER32 is None:
             return False
 
         with self._lock:
-            # Unregister existing if present
             if hotkey in self._hotkey_to_id:
                 self._unregister_internal(hotkey)
 
@@ -135,10 +152,139 @@ class Win32HotkeyListener:
             hotkey_id = self._next_id
             self._next_id += 1
 
-            # Try to register
-            result = _USER32.RegisterHotKey(None, hotkey_id, modifiers, vk)
+            self._pending[hotkey] = (modifiers, vk, hotkey_id, callback)
+            self._hotkey_to_id[hotkey] = hotkey_id
+            self._callbacks[hotkey_id] = callback
+            self._failed_hotkeys.pop(hotkey, None)
+            logger.debug("Queued Win32 hotkey '%s' for registration (id=%d)", hotkey, hotkey_id)
+
+            hwnd = self._hwnd
+            thread_alive = self._thread is not None and self._thread.is_alive()
+
+            if thread_alive and hwnd:
+                try:
+                    USER32.PostMessageW(hwnd, _WM_USER_REGISTER, 0, 0)
+                except Exception:
+                    logger.debug("PostMessageW failed for register notification")
+
+        return True
+
+    def unregister(self, hotkey: str) -> None:
+        with self._lock:
+            self._unregister_internal(hotkey)
+
+    def _unregister_internal(self, hotkey: str) -> None:
+        hotkey_id = self._hotkey_to_id.pop(hotkey, None)
+        if hotkey_id is not None:
+            if hotkey not in self._pending:
+                self._pending_unregisters.append(hotkey_id)
+                hwnd = self._hwnd
+                thread_alive = self._thread is not None and self._thread.is_alive()
+                if thread_alive and hwnd:
+                    try:
+                        USER32.PostMessageW(hwnd, _WM_USER_UNREGISTER, 0, 0)
+                    except Exception:
+                        logger.debug("PostMessageW failed for unregister notification")
+            self._callbacks.pop(hotkey_id, None)
+            self._pending.pop(hotkey, None)
+            self._failed_hotkeys.pop(hotkey, None)
+            logger.info("Unregistered Win32 hotkey '%s' id=%d", hotkey, hotkey_id)
+
+    def clear(self) -> None:
+        with self._lock:
+            hotkey_ids = list(self._callbacks.keys())
+            self._pending_unregisters.extend(hotkey_ids)
+            self._callbacks.clear()
+            self._hotkey_to_id.clear()
+            self._failed_hotkeys.clear()
+            self._pending.clear()
+            self._next_id = 1
+            if self._retry_timer is not None:
+                self._retry_timer.cancel()
+                self._retry_timer = None
+            hwnd = self._hwnd
+            thread_alive = self._thread is not None and self._thread.is_alive()
+        if thread_alive and hwnd and hotkey_ids:
+            try:
+                USER32.PostMessageW(hwnd, _WM_USER_UNREGISTER, 0, 0)
+            except Exception:
+                logger.debug("PostMessageW failed for clear notification")
+        if not thread_alive:
+            self._wnd_proc_ref = None
+            self._wndproc_type = None
+
+    def start(self) -> None:
+        if not IS_WINDOWS:
+            logger.warning("Win32 hotkeys only available on Windows")
+            return
+
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                hwnd = self._hwnd
+                has_pending = bool(self._pending)
+                if hwnd and has_pending:
+                    try:
+                        USER32.PostMessageW(hwnd, _WM_USER_REGISTER, 0, 0)
+                    except Exception:
+                        logger.debug("PostMessageW failed for start notification")
+                return
+
+            if not self._callbacks and not self._pending:
+                logger.debug("No hotkeys registered, skipping Win32 message loop")
+                return
+
+        self._stop_event.clear()
+        self._ready_event.clear()
+        self._thread = threading.Thread(target=self._message_loop, name="win32-hotkey-loop", daemon=True)
+        self._thread.start()
+        self._ready_event.wait(timeout=5.0)
+        logger.info("Win32 hotkey listener started: %d registered, %d failed",
+                     len(self._callbacks), len(self._failed_hotkeys))
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        with self._lock:
+            hwnd = self._hwnd
+            self._hwnd = None
+            if self._retry_timer is not None:
+                self._retry_timer.cancel()
+                self._retry_timer = None
+        if USER32 is not None and hwnd:
+            try:
+                USER32.PostMessageW(hwnd, _WM_USER_STOP, 0, 0)
+            except Exception:
+                logger.debug("Failed to post stop message to hotkey window (may already be destroyed)")
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        self._unregister_all_win32()
+        logger.info("Win32 hotkey listener stopped")
+
+    def _unregister_all_win32(self) -> None:
+        if USER32 is None:
+            return
+        with self._lock:
+            hotkey_ids = list(self._callbacks.keys())
+        for hotkey_id in hotkey_ids:
+            try:
+                USER32.UnregisterHotKey(None, hotkey_id)
+            except Exception:
+                pass
+
+    def _register_pending_hotkeys(self) -> None:
+        with self._lock:
+            pending = dict(self._pending)
+            self._pending.clear()
+
+        succeeded: list[str] = []
+        for hotkey, (modifiers, vk, hotkey_id, callback) in pending.items():
+            try:
+                result = USER32.RegisterHotKey(None, hotkey_id, modifiers, vk)
+            except Exception:
+                result = 0
+                logger.error("RegisterHotKey raised exception for '%s'", hotkey)
             if result == 0:
-                err = _KERNEL32.GetLastError()
+                err = ctypes.get_last_error()
                 if err == ERROR_HOTKEY_ALREADY_REGISTERED:
                     logger.warning(
                         "Hotkey '%s' is already registered by another application (error %d)",
@@ -148,143 +294,139 @@ class Win32HotkeyListener:
                     logger.error(
                         "Failed to register hotkey '%s': error %d", hotkey, err,
                     )
-                self._failed_hotkeys[hotkey] = self._failed_hotkeys.get(hotkey, 0) + 1
-                return False
+                with self._lock:
+                    self._failed_hotkeys[hotkey] = self._failed_hotkeys.get(hotkey, 0) + 1
+            else:
+                logger.info("Registered Win32 hotkey '%s' with id=%d", hotkey, hotkey_id)
+                succeeded.append(hotkey)
 
-            self._callbacks[hotkey_id] = callback
-            self._hotkey_to_id[hotkey] = hotkey_id
-            self._failed_hotkeys.pop(hotkey, None)
-            logger.info("Registered Win32 hotkey '%s' with id=%d", hotkey, hotkey_id)
-            return True
-
-    def unregister(self, hotkey: str) -> None:
-        """Unregister a global hotkey."""
         with self._lock:
-            self._unregister_internal(hotkey)
+            for hotkey in succeeded:
+                self._failed_hotkeys.pop(hotkey, None)
+            if self._failed_hotkeys:
+                self._schedule_retry()
 
-    def _unregister_internal(self, hotkey: str) -> None:
-        hotkey_id = self._hotkey_to_id.pop(hotkey, None)
-        if hotkey_id is not None:
-            _USER32.UnregisterHotKey(None, hotkey_id)
-            self._callbacks.pop(hotkey_id, None)
-            logger.info("Unregistered Win32 hotkey '%s' id=%d", hotkey, hotkey_id)
-
-    def clear(self) -> None:
-        """Remove all hotkey bindings."""
+    def _process_pending_unregisters(self) -> None:
         with self._lock:
-            for hotkey_id in list(self._callbacks.keys()):
-                _USER32.UnregisterHotKey(None, hotkey_id)
-            self._callbacks.clear()
-            self._hotkey_to_id.clear()
-            self._failed_hotkeys.clear()
-
-    def start(self) -> None:
-        """Start the message loop thread."""
-        if not _IS_WINDOWS:
-            logger.warning("Win32 hotkeys only available on Windows")
-            return
-        if self._thread is not None and self._thread.is_alive():
-            return
-        if not self._callbacks:
-            logger.debug("No hotkeys registered, skipping Win32 message loop")
-            return
-
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._message_loop, name="win32-hotkey-loop", daemon=True)
-        self._thread.start()
-        logger.info("Win32 hotkey listener started with %d hotkeys", len(self._callbacks))
-
-    def stop(self) -> None:
-        """Stop the message loop thread."""
-        self._stop_event.set()
-        # Post a message to wake up GetMessage
-        if _USER32 is not None and self._hwnd:
-            _USER32.PostMessageW(self._hwnd, WM_HOTKEY, 0, 0)
-        if self._thread is not None:
-            self._thread.join(timeout=1.0)
-            self._thread = None
-        self.clear()
-        logger.info("Win32 hotkey listener stopped")
+            ids = list(self._pending_unregisters)
+            self._pending_unregisters.clear()
+        for hotkey_id in ids:
+            try:
+                USER32.UnregisterHotKey(None, hotkey_id)
+            except Exception:
+                logger.debug("Failed to unregister Win32 hotkey id=%d", hotkey_id)
 
     def _message_loop(self) -> None:
-        """Windows message loop for hotkey notifications."""
-        if _USER32 is None:
+        if USER32 is None or KERNEL32 is None:
+            self._ready_event.set()
             return
 
-        # Create a message-only window
-        WNDPROC = ctypes.WINFUNCTYPE(
-            wintypes.LPARAM, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+        if self._stop_event.is_set():
+            self._ready_event.set()
+            return
+
+        self._wndproc_type = ctypes.WINFUNCTYPE(
+            ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT,
+            ctypes.c_ssize_t, ctypes.c_ssize_t,
         )
+        WNDPROC = self._wndproc_type
 
         @WNDPROC
         def wnd_proc(hwnd, msg, wparam, lparam):
             if msg == WM_HOTKEY:
-                with self._lock:
-                    callback = self._callbacks.get(int(wparam))
+                hotkey_id = int(wparam)
+                callback = self._callbacks.get(hotkey_id)
                 if callback is not None:
                     try:
                         callback()
                     except Exception:
-                        logger.exception("Error in Win32 hotkey callback")
-            return _USER32.DefWindowProcW(hwnd, msg, wparam, lparam)
+                        logger.exception("Error executing hotkey callback for id=%d", hotkey_id)
+                else:
+                    logger.debug("Received WM_HOTKEY for unknown id=%d", hotkey_id)
+                return 0
+            if msg == _WM_USER_STOP:
+                USER32.PostQuitMessage(0)
+                return 0
+            elif msg == _WM_USER_REGISTER:
+                self._register_pending_hotkeys()
+                return 0
+            elif msg == _WM_USER_UNREGISTER:
+                self._process_pending_unregisters()
+                return 0
+            return USER32.DefWindowProcW(hwnd, msg, wparam, lparam)
 
-        # Register window class
-        class WNDCLASSW(ctypes.Structure):
-            _fields_ = [
-                ("style", wintypes.UINT),
-                ("lpfnWndProc", WNDPROC),
-                ("cbClsExtra", ctypes.c_int),
-                ("cbWndExtra", ctypes.c_int),
-                ("hInstance", wintypes.HINSTANCE),
-                ("hIcon", wintypes.HANDLE),
-                ("hCursor", wintypes.HANDLE),
-                ("hbrBackground", wintypes.HANDLE),
-                ("lpszMenuName", wintypes.LPCWSTR),
-                ("lpszClassName", wintypes.LPCWSTR),
-            ]
+        self._wnd_proc_ref = wnd_proc
 
-        hinst = _KERNEL32.GetModuleHandleW(None)
-        class_name = "PLatexHotkeyWindow"
+        hinst = KERNEL32.GetModuleHandleW(None) if KERNEL32 else None
+        class_name = f"PLatexHotkeyWnd_{self._instance_id}"
 
-        wndclass = WNDCLASSW()
-        wndclass.lpfnWndProc = wnd_proc
-        wndclass.hInstance = hinst
-        wndclass.lpszClassName = class_name
-
-        if not _USER32.RegisterClassW(ctypes.byref(wndclass)):
-            err = _KERNEL32.GetLastError()
-            if err != 0:  # ERROR_CLASS_ALREADY_EXISTS = 1410, but 0 may also mean success
-                logger.error("Failed to register window class for hotkeys: error %d", err)
-                return
-
-        HWND_MESSAGE = -3
-        self._hwnd = _USER32.CreateWindowExW(
-            0, class_name, "PLatex Hotkeys",
-            0, 0, 0, 0, 0,
-            HWND_MESSAGE,
-            None, hinst, None,
-        )
-
-        if not self._hwnd:
-            err = _KERNEL32.GetLastError()
-            logger.error("Failed to create message-only window for hotkeys: error %d", err)
+        if self._stop_event.is_set():
+            self._ready_event.set()
             return
 
-        msg = wintypes.MSG()
-        while not self._stop_event.is_set():
-            ret = _USER32.GetMessageW(ctypes.byref(msg), self._hwnd, 0, 0)
-            if ret == -1:
-                break
-            if ret == 0:  # WM_QUIT
-                break
-            _USER32.TranslateMessage(ctypes.byref(msg))
-            _USER32.DispatchMessageW(ctypes.byref(msg))
+        if not register_window_class(class_name, self._wnd_proc_ref, WNDPROC, hinst):
+            self._ready_event.set()
+            return
 
-        _USER32.DestroyWindow(self._hwnd)
-        self._hwnd = None
+        if self._stop_event.is_set():
+            destroy_message_window(0, class_name, hinst)
+            self._ready_event.set()
+            return
+
+        hwnd = create_message_window(class_name, "PLatex Hotkeys", hinst)
+        if not hwnd:
+            destroy_message_window(0, class_name, hinst)
+            self._ready_event.set()
+            return
+
+        with self._lock:
+            self._hwnd = hwnd
+
+        self._register_pending_hotkeys()
+
+        self._ready_event.set()
+
+        msg = wintypes.MSG()
+        try:
+            while not self._stop_event.is_set():
+                try:
+                    ret = USER32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                except Exception:
+                    logger.exception("GetMessageW raised unexpected exception")
+                    break
+                if ret == -1:
+                    err = ctypes.get_last_error()
+                    logger.error("GetMessageW returned -1 (error %d)", err)
+                    break
+                if ret == 0:
+                    break
+                if msg.message == WM_HOTKEY:
+                    hotkey_id = int(msg.wParam)
+                    callback = self._callbacks.get(hotkey_id)
+                    if callback is not None:
+                        try:
+                            callback()
+                        except Exception:
+                            logger.exception("Error executing hotkey callback for id=%d", hotkey_id)
+                    else:
+                        logger.debug("Received WM_HOTKEY for unknown id=%d", hotkey_id)
+                    continue
+                try:
+                    USER32.TranslateMessage(ctypes.byref(msg))
+                    USER32.DispatchMessageW(ctypes.byref(msg))
+                except Exception:
+                    logger.exception("Error dispatching window message")
+        except Exception:
+            logger.exception("Unexpected error in hotkey message loop")
+        finally:
+            with self._lock:
+                self._hwnd = None
+            destroy_message_window(hwnd, class_name, hinst)
+            with self._lock:
+                self._wnd_proc_ref = None
+                self._wndproc_type = None
 
     def get_status(self) -> dict[str, Any]:
-        """Return current hotkey registration status."""
         with self._lock:
             return {
                 "registered": list(self._hotkey_to_id.keys()),
@@ -293,18 +435,68 @@ class Win32HotkeyListener:
             }
 
     def schedule_retry(self, delay: float = 5.0) -> None:
-        """Schedule a retry for failed hotkeys."""
-        if self._retry_timer is not None:
-            self._retry_timer.cancel()
+        self._schedule_retry(delay)
 
-        def _retry() -> None:
-            with self._lock:
-                failed = list(self._failed_hotkeys.keys())
-            for hotkey in failed:
-                # We need the callback but it's not stored separately
-                # Retry is handled by the caller (HotkeyListener)
-                pass
+    def _schedule_retry(self, delay: float = 5.0) -> None:
+        with self._lock:
+            if self._retry_timer is not None:
+                self._retry_timer.cancel()
+                self._retry_timer = None
 
-        self._retry_timer = threading.Timer(delay, _retry)
-        self._retry_timer.daemon = True
-        self._retry_timer.start()
+            if not self._failed_hotkeys:
+                return
+            for hotkey, count in self._failed_hotkeys.items():
+                if count >= _MAX_RETRY_COUNT:
+                    logger.warning("Giving up retrying hotkey '%s' after %d failures", hotkey, count)
+            still_retryable = {k: v for k, v in self._failed_hotkeys.items() if v < _MAX_RETRY_COUNT}
+            if not still_retryable:
+                return
+            hwnd = self._hwnd
+            thread_alive = self._thread is not None and self._thread.is_alive()
+
+            if not thread_alive or not hwnd:
+                return
+
+            def _retry() -> None:
+                with self._lock:
+                    if self._stop_event.is_set():
+                        return
+                    if self._retry_timer is None:
+                        return
+                    if self._thread is None or not self._thread.is_alive():
+                        return
+                    hwnd_now = self._hwnd
+                    for hotkey in list(self._failed_hotkeys.keys()):
+                        if self._failed_hotkeys[hotkey] >= _MAX_RETRY_COUNT:
+                            continue
+                        parsed = self._parse_hotkey(hotkey)
+                        if parsed is None:
+                            continue
+                        modifiers, vk = parsed
+                        hotkey_id = self._next_id
+                        self._next_id += 1
+                        old_id = self._hotkey_to_id.get(hotkey)
+                        callback = self._callbacks.get(old_id) if old_id is not None else None
+                        if callback is None:
+                            continue
+                        if old_id is not None:
+                            self._callbacks.pop(old_id, None)
+                        self._hotkey_to_id[hotkey] = hotkey_id
+                        self._callbacks[hotkey_id] = callback
+                        self._pending[hotkey] = (modifiers, vk, hotkey_id, callback)
+                        del self._failed_hotkeys[hotkey]
+                    has_failed = bool(self._failed_hotkeys)
+
+                if hwnd_now:
+                    try:
+                        USER32.PostMessageW(hwnd_now, _WM_USER_REGISTER, 0, 0)
+                    except Exception:
+                        logger.debug("Failed to post register message during retry (window may be destroyed)")
+
+                if has_failed:
+                    next_delay = min(delay * 1.5, _MAX_RETRY_DELAY)
+                    self._schedule_retry(next_delay)
+
+            self._retry_timer = threading.Timer(delay, _retry)
+            self._retry_timer.daemon = True
+            self._retry_timer.start()

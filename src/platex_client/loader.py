@@ -1,39 +1,31 @@
 from __future__ import annotations
 
-import importlib.util
 import logging
 from pathlib import Path
 from types import ModuleType
 
 from .models import OcrProcessor
 from .script_base import ScriptBase
-from .script_registry import ScriptRegistry
+from .script_safety import (
+    _check_dangerous_patterns,
+    _extract_legacy_result,
+    _load_script_module,
+    validate_script_path,
+)
 
 logger = logging.getLogger("platex.loader")
 
 
-def load_script_processor(script_path: Path) -> "OcrProcessorAdapter":
-    """Load a script file and return an OcrProcessor-compatible adapter.
+def load_script_processor(script_path: Path) -> OcrProcessorAdapter | LegacyProcessor:
+    validate_script_path(script_path)
 
-    Supports both:
-    - New-style scripts with create_script() -> ScriptBase
-    - Legacy scripts with process_image(image_bytes, context) function
-    """
-    if not script_path.exists():
-        raise FileNotFoundError(f"OCR script not found: {script_path}")
+    resolved = script_path.resolve()
+    logger.info("Loading script processor from %s (size=%d)", resolved, resolved.stat().st_size)
 
-    module_name = f"platex_script_{script_path.stem}"
-    spec = importlib.util.spec_from_file_location(module_name, script_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Unable to load script from {script_path}")
+    _check_dangerous_patterns(script_path)
 
-    module = importlib.util.module_from_spec(spec)
-    try:
-        spec.loader.exec_module(module)
-    except Exception as exc:
-        raise RuntimeError(f"Failed to execute script {script_path}: {exc}") from exc
+    module = _load_script_module(script_path)
 
-    # Try new-style: module has create_script() -> ScriptBase
     create_fn = getattr(module, "create_script", None)
     if callable(create_fn):
         script = create_fn()
@@ -42,7 +34,6 @@ def load_script_processor(script_path: Path) -> "OcrProcessorAdapter":
         if script is not None:
             logger.warning("create_script() returned %s (expected ScriptBase)", type(script).__name__)
 
-    # Try legacy: module has process_image() function
     process_image_fn = getattr(module, "process_image", None)
     if callable(process_image_fn):
         return LegacyProcessor(module, script_path)
@@ -51,8 +42,6 @@ def load_script_processor(script_path: Path) -> "OcrProcessorAdapter":
 
 
 class OcrProcessorAdapter(OcrProcessor):
-    """Wraps a ScriptBase with OCR capability as an OcrProcessor."""
-
     def __init__(self, script: ScriptBase) -> None:
         self._script = script
 
@@ -61,8 +50,6 @@ class OcrProcessorAdapter(OcrProcessor):
 
 
 class LegacyProcessor(OcrProcessor):
-    """Wraps a legacy module-level process_image function as an OcrProcessor."""
-
     def __init__(self, module: ModuleType, source_path: Path) -> None:
         self._module = module
         self._source_path = source_path
@@ -73,14 +60,4 @@ class LegacyProcessor(OcrProcessor):
             raise RuntimeError(f"Script {self._source_path} does not define process_image(image_bytes, context)")
 
         result = process_image(image_bytes, context or {})
-        if isinstance(result, str):
-            latex = result
-        elif isinstance(result, dict) and "latex" in result:
-            latex = str(result["latex"])
-        else:
-            raise RuntimeError(f"Script {self._source_path} returned an unsupported result")
-
-        latex = latex.strip()
-        if not latex:
-            raise RuntimeError(f"Script {self._source_path} returned empty LaTeX")
-        return latex
+        return _extract_legacy_result(self._module, self._source_path, result)
