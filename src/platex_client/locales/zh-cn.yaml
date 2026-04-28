@@ -107,3 +107,10 @@ tray_status_latest: "PLatex 客户端 | {mode} | 最近 {hash}"
 tray_status_error: "PLatex 客户端 | {mode} | 上次错误 {error}"
 
 tray_ocr_success_title: "PLatex OCR 成功"
+
+btn_verify_api_key: "验证"
+api_key_verify_empty: "✗ API Key 不能为空"
+api_key_verify_masked: "✗ 请输入新的 API Key（当前为掩码值）"
+api_key_verify_validating: "正在验证..."
+api_key_verify_success: "✓ API Key 验证通过"
+api_key_verify_failed: "✗ 验证失败: {error}"

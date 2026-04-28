@@ -26,13 +26,14 @@ class AppConfig:
     language_pack: str = ""
 
     def apply_environment(self) -> None:
+        from .api_key_masking import _is_masked_value
         from .secrets import set_secret, has_secret
 
-        if self.glm_api_key and not has_secret("GLM_API_KEY"):
+        if self.glm_api_key and not _is_masked_value(self.glm_api_key) and not has_secret("GLM_API_KEY"):
             set_secret("GLM_API_KEY", self.glm_api_key)
-        if self.glm_model and not has_secret("GLM_MODEL"):
+        if self.glm_model and not _is_masked_value(self.glm_model) and not has_secret("GLM_MODEL"):
             set_secret("GLM_MODEL", self.glm_model)
-        if self.glm_base_url and not has_secret("GLM_BASE_URL"):
+        if self.glm_base_url and not _is_masked_value(self.glm_base_url) and not has_secret("GLM_BASE_URL"):
             set_secret("GLM_BASE_URL", self.glm_base_url)
 
 

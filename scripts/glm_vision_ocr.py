@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -95,6 +96,47 @@ def _sanitize_error_detail(text: str, max_len: int = 200) -> str:
     sanitized = re.sub(r'(Bearer\s+)[A-Za-z0-9_\-.]+', r'\1***', sanitized)
     sanitized = re.sub(r'(api[_-]?key["\s:=]+)["\w\-.]+', r'\1***', sanitized)
     return sanitized
+
+
+def _validate_api_key(api_key: str, model: str, base_url: str) -> tuple[bool, str]:
+    if not api_key:
+        return False, "API Key is empty"
+    try:
+        base_url = _validate_base_url(base_url)
+    except ValueError as exc:
+        return False, str(exc)
+    payload = {
+        "model": model,
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(base_url, data=body, headers=headers, method="POST")
+    try:
+        with urlopen(request, timeout=30) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+        data = json.loads(response_body)
+        if isinstance(data.get("choices"), list) and len(data["choices"]) > 0:
+            return True, "OK"
+        error_msg = str(data.get("error", data.get("message", "")))
+        if error_msg:
+            return False, _sanitize_error_detail(error_msg)
+        return False, _sanitize_response_for_log(data)
+    except HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 401:
+            return False, "Authentication failed: invalid API Key"
+        return False, f"HTTP {exc.code}: {_sanitize_error_detail(error_body)}"
+    except URLError as exc:
+        return False, f"Network error: {exc.reason}"
+    except (TimeoutError, ConnectionError, OSError) as exc:
+        return False, f"Connection error: {exc}"
+    except Exception as exc:
+        return False, str(exc)
 
 
 class OcrScript(ScriptBase):
@@ -189,6 +231,9 @@ class OcrScript(ScriptBase):
                 return image_bytes, "PNG"
             raise RuntimeError(f"Image is too large ({len(image_bytes)} bytes) and could not be resized")
 
+    _MAX_RETRIES = 2
+    _RETRY_DELAY = 1.0
+
     def process_image(self, image_bytes: bytes, context: dict[str, object] | None = None) -> str:
         from platex_client.secrets import get_secret
         api_key = self._api_key or get_secret("GLM_API_KEY") or os.getenv("GLM_API_KEY")
@@ -233,23 +278,50 @@ class OcrScript(ScriptBase):
             "Content-Type": "application/json",
         }
         body = json.dumps(payload).encode("utf-8")
-        request = Request(base_url, data=body, headers=headers, method="POST")
-        try:
-            with urlopen(request, timeout=90) as response:
-                response_body = response.read().decode("utf-8", errors="replace")
-        except HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 400 and "does not support image" in error_body:
-                raise RuntimeError(
-                    f"Model '{model}' does not support image input. "
-                    f"Please switch to a vision model (e.g. glm-4.1v-thinking-flash) "
-                    f"in the OCR settings tab."
-                ) from exc
-            raise RuntimeError(f"GLM HTTP error {exc.code}: {_sanitize_error_detail(error_body)}") from exc
-        except URLError as exc:
-            raise RuntimeError(f"GLM request failed: {exc.reason}") from exc
-        except (TimeoutError, ConnectionError, OSError) as exc:
-            raise RuntimeError(f"GLM network error: {exc}") from exc
+
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_RETRIES + 2):
+            request = Request(base_url, data=body, headers=headers, method="POST")
+            try:
+                with urlopen(request, timeout=90) as response:
+                    response_body = response.read().decode("utf-8", errors="replace")
+                break
+            except HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                if exc.code == 400 and "does not support image" in error_body:
+                    raise RuntimeError(
+                        f"Model '{model}' does not support image input. "
+                        f"Please switch to a vision model (e.g. glm-4.1v-thinking-flash) "
+                        f"in the OCR settings tab."
+                    ) from exc
+                if exc.code in (429, 500, 502, 503, 504) and attempt <= self._MAX_RETRIES:
+                    last_exc = exc
+                    delay = self._RETRY_DELAY * attempt
+                    logger.warning("GLM HTTP %d, retrying in %.1fs (attempt %d/%d)", exc.code, delay, attempt, self._MAX_RETRIES + 1)
+                    import time
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(f"GLM HTTP error {exc.code}: {_sanitize_error_detail(error_body)}") from exc
+            except URLError as exc:
+                if attempt <= self._MAX_RETRIES:
+                    last_exc = exc
+                    delay = self._RETRY_DELAY * attempt
+                    logger.warning("GLM URL error, retrying in %.1fs (attempt %d/%d): %s", delay, attempt, self._MAX_RETRIES + 1, exc.reason)
+                    import time
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(f"GLM request failed: {exc.reason}") from exc
+            except (TimeoutError, ConnectionError, OSError) as exc:
+                if attempt <= self._MAX_RETRIES:
+                    last_exc = exc
+                    delay = self._RETRY_DELAY * attempt
+                    logger.warning("GLM network error, retrying in %.1fs (attempt %d/%d): %s", delay, attempt, self._MAX_RETRIES + 1, exc)
+                    import time
+                    time.sleep(delay)
+                    continue
+                raise RuntimeError(f"GLM network error: {exc}") from exc
+        else:
+            raise RuntimeError(f"GLM request failed after {self._MAX_RETRIES + 1} attempts") from last_exc
 
         try:
             data = json.loads(response_body)
@@ -275,6 +347,7 @@ class OcrScript(ScriptBase):
 
     def create_settings_widget(self, parent=None):
         try:
+            from PyQt6.QtCore import pyqtSignal, QObject
             from PyQt6.QtWidgets import (
                 QWidget,
                 QVBoxLayout,
@@ -287,7 +360,12 @@ class OcrScript(ScriptBase):
         except ImportError:
             return None
 
+        from platex_client.i18n import t as _t
+
         script_ref = self
+
+        class _ValidateSignals(QObject):
+            finished = pyqtSignal(bool, str)
 
         class _OcrSettingsWidget(QWidget):
             def __init__(self, inner_parent: QWidget | None = None) -> None:
@@ -296,16 +374,29 @@ class OcrScript(ScriptBase):
                 layout.setContentsMargins(12, 12, 12, 12)
                 layout.setSpacing(10)
 
-                # API Key
                 layout.addWidget(QLabel("API Key:"))
+                api_key_row = QHBoxLayout()
                 self._api_key_edit = QLineEdit()
                 self._api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
                 self._api_key_edit.setPlaceholderText("GLM API Key")
                 if script_ref._api_key:
                     self._api_key_edit.setText(script_ref._api_key)
-                layout.addWidget(self._api_key_edit)
+                api_key_row.addWidget(self._api_key_edit, 1)
 
-                # Model
+                self._btn_verify = QPushButton(_t("btn_verify_api_key"))
+                self._btn_verify.setFixedWidth(60)
+                api_key_row.addWidget(self._btn_verify)
+                layout.addLayout(api_key_row)
+
+                self._verify_status = QLabel("")
+                self._verify_status.setWordWrap(True)
+                self._verify_status.setStyleSheet("font-size: 12px; color: rgba(138, 144, 168, 200);")
+                layout.addWidget(self._verify_status)
+
+                self._validate_signals = _ValidateSignals()
+                self._validate_signals.finished.connect(self._on_validate_finished)
+                self._btn_verify.clicked.connect(self._start_validate)
+
                 layout.addWidget(QLabel("Model:"))
                 self._model_edit = QLineEdit()
                 self._model_edit.setPlaceholderText("e.g. glm-4.1v-thinking-flash")
@@ -313,13 +404,12 @@ class OcrScript(ScriptBase):
                 layout.addWidget(self._model_edit)
 
                 self._model_warning = QLabel("")
-                self._model_warning.setStyleSheet("color: #d4787e; font-size: 12px;")
+                self._model_warning.setStyleSheet("color: rgba(212, 120, 126, 220); font-size: 12px;")
                 self._model_warning.setWordWrap(True)
                 layout.addWidget(self._model_warning)
                 self._model_edit.textChanged.connect(self._check_model)
                 self._check_model()
 
-                # Base URL
                 layout.addWidget(QLabel("Base URL:"))
                 self._base_url_edit = QLineEdit()
                 self._base_url_edit.setText(script_ref._base_url)
@@ -336,6 +426,43 @@ class OcrScript(ScriptBase):
                     )
                 else:
                     self._model_warning.setText("")
+
+            def _start_validate(self) -> None:
+                api_key = self._api_key_edit.text().strip()
+                if not api_key:
+                    self._verify_status.setStyleSheet("color: rgba(212, 120, 126, 220); font-size: 12px;")
+                    self._verify_status.setText(_t("api_key_verify_empty"))
+                    return
+                if re.match(r"^.{1,4}\*+$", api_key):
+                    self._verify_status.setStyleSheet("color: rgba(212, 120, 126, 220); font-size: 12px;")
+                    self._verify_status.setText(_t("api_key_verify_masked"))
+                    return
+
+                self._btn_verify.setEnabled(False)
+                self._btn_verify.setText("...")
+                self._verify_status.setStyleSheet("color: rgba(138, 144, 168, 200); font-size: 12px;")
+                self._verify_status.setText(_t("api_key_verify_validating"))
+
+                model = self._model_edit.text().strip() or "glm-4.1v-thinking-flash"
+                base_url = self._base_url_edit.text().strip() or "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+                signals = self._validate_signals
+
+                def _run():
+                    ok, msg = _validate_api_key(api_key, model, base_url)
+                    signals.finished.emit(ok, msg)
+
+                th = threading.Thread(target=_run, daemon=True)
+                th.start()
+
+            def _on_validate_finished(self, ok: bool, msg: str) -> None:
+                self._btn_verify.setEnabled(True)
+                self._btn_verify.setText(_t("btn_verify_api_key"))
+                if ok:
+                    self._verify_status.setStyleSheet("color: rgba(140, 196, 144, 220); font-size: 12px;")
+                    self._verify_status.setText(_t("api_key_verify_success"))
+                else:
+                    self._verify_status.setStyleSheet("color: rgba(212, 120, 126, 220); font-size: 12px;")
+                    self._verify_status.setText(_t("api_key_verify_failed", error=msg))
 
             def save_settings(self) -> None:
                 from platex_client.secrets import set_secret

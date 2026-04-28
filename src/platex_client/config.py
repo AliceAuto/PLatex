@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from .api_key_masking import fill_masked_api_keys, hide_api_key, restore_api_key, strip_api_keys
+from .api_key_masking import _is_masked_value, fill_masked_api_keys, hide_api_key, restore_api_key, strip_api_keys
 from .config_manager import config_file_path
 
 logger = logging.getLogger("platex.config")
@@ -37,11 +37,11 @@ class AppConfig:
     def apply_environment(self) -> None:
         from .secrets import set_secret, has_secret
 
-        if self.glm_api_key and not has_secret("GLM_API_KEY"):
+        if self.glm_api_key and not _is_masked_value(self.glm_api_key) and not has_secret("GLM_API_KEY"):
             set_secret("GLM_API_KEY", self.glm_api_key)
-        if self.glm_model and not has_secret("GLM_MODEL"):
+        if self.glm_model and not _is_masked_value(self.glm_model) and not has_secret("GLM_MODEL"):
             set_secret("GLM_MODEL", self.glm_model)
-        if self.glm_base_url and not has_secret("GLM_BASE_URL"):
+        if self.glm_base_url and not _is_masked_value(self.glm_base_url) and not has_secret("GLM_BASE_URL"):
             set_secret("GLM_BASE_URL", self.glm_base_url)
 
 
@@ -121,7 +121,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     if not isinstance(payload, dict):
         raise ValueError(f"Configuration file must contain a mapping: {path}")
 
-    raw_interval = float(payload.get("interval", 0.8))
+    try:
+        raw_interval = float(payload.get("interval", 0.8))
+    except (TypeError, ValueError):
+        raw_interval = 0.8
     if raw_interval <= 0:
         raw_interval = 0.8
     raw_interval = max(0.1, min(raw_interval, 60.0))
@@ -243,11 +246,28 @@ class ConfigStore:
             self._save_to_disk()
 
     def _save_to_disk(self) -> None:
-        disk_payload = strip_api_keys(self._disk_payload)
-        text = yaml.safe_dump(disk_payload, sort_keys=False, allow_unicode=True)
-        cfg_path = config_file_path()
-        cfg_path.parent.mkdir(parents=True, exist_ok=True)
-        cfg_path.write_text(text, encoding="utf-8")
+        try:
+            disk_payload = strip_api_keys(self._disk_payload)
+            text = yaml.safe_dump(disk_payload, sort_keys=False, allow_unicode=True)
+            cfg_path = config_file_path()
+            cfg_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = cfg_path.with_suffix(".yaml.tmp")
+            try:
+                tmp_path.write_text(text, encoding="utf-8")
+                tmp_path.replace(cfg_path)
+            except OSError:
+                logger.exception("Atomic config save failed, attempting direct write as fallback")
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                try:
+                    cfg_path.write_text(text, encoding="utf-8")
+                except Exception:
+                    logger.exception("Failed to save config file even with direct write")
+        except Exception:
+            logger.exception("Failed to save configuration to disk")
+            return
         try:
             if os.name == "nt":
                 import ctypes

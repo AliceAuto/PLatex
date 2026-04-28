@@ -245,6 +245,8 @@ def convert_hotkey_str(hotkey: str) -> str:
     }
 
     hotkey = hotkey.split(",", 1)[0].strip()
+    if hotkey.endswith("+"):
+        raise ValueError(f"Trailing '+' in hotkey string: {hotkey!r}")
 
     _MULTI_WORD_KEYS = [
         "page up", "page down", "caps lock", "num lock", "number lock",
@@ -281,7 +283,29 @@ def convert_hotkey_str(hotkey: str) -> str:
     for mw in _MULTI_WORD_KEYS:
         normalized = normalized.replace(mw, mw.replace(" ", "_"))
 
-    parts = normalized.split("+")
+    _SPECIAL_CHARS = {"+", "=", "-", ","}
+    raw_parts: list[str] = []
+    current = []
+    i = 0
+    while i < len(normalized):
+        ch = normalized[i]
+        if ch == "+":
+            if current:
+                raw_parts.append("".join(current))
+                current = []
+            elif raw_parts and not raw_parts[-1]:
+                raw_parts[-1] = "+"
+                i += 1
+                continue
+            else:
+                raw_parts.append("")
+        else:
+            current.append(ch)
+        i += 1
+    if current:
+        raw_parts.append("".join(current))
+
+    parts = [p for p in raw_parts if p]
     if not parts:
         raise ValueError(f"Invalid hotkey string: {hotkey!r}")
 
@@ -298,6 +322,8 @@ def convert_hotkey_str(hotkey: str) -> str:
             converted.append(f"<{key}>")
         elif len(key) == 1 and key.isalnum():
             converted.append(key)
+        elif key in _SPECIAL_CHARS:
+            converted.append(f"<{key}>")
         else:
             converted.append(f"<{key}>")
     return "+".join(converted)
@@ -367,6 +393,8 @@ class HotkeyListener:
         self._max_retries: int = 20
         self._status_callbacks: list[Callable[[dict], None]] = []
         self._batch_depth: int = 0
+        self._passthrough_bindings: dict[str, Callable[[], None]] = {}
+        self._ll_hook: Any | None = None
 
         if IS_WINDOWS:
             try:
@@ -427,16 +455,22 @@ class HotkeyListener:
         with self._lock:
             self._bindings.clear()
             self._failed_bindings.clear()
+            self._passthrough_bindings.clear()
             self._cancel_retry()
             if self._win32_backend is not None:
                 self._win32_backend.clear()
             if self._pynput_backend is not None:
                 self._pynput_backend.set_bindings({})
                 self._pynput_backend.stop()
+            if self._ll_hook is not None:
+                self._ll_hook.clear()
+                self._ll_hook.stop()
+                self._ll_hook = None
 
     def start(self) -> None:
         self._running = True
         self._rebuild_listener()
+        self._rebuild_passthrough()
 
     def stop(self) -> None:
         self._running = False
@@ -446,6 +480,9 @@ class HotkeyListener:
                 self._win32_backend.stop()
             if self._pynput_backend is not None:
                 self._pynput_backend.stop()
+            if self._ll_hook is not None:
+                self._ll_hook.stop()
+                self._ll_hook = None
 
     def suspend(self) -> None:
         self._active.clear()
@@ -462,6 +499,71 @@ class HotkeyListener:
             self._batch_depth = max(0, self._batch_depth - 1)
         if self._running:
             self._rebuild_listener()
+
+    def register_passthrough(self, hotkey: str, callback: Callable[[], None]) -> bool:
+        with self._lock:
+            self._passthrough_bindings[hotkey] = callback
+        if self._running:
+            self._rebuild_passthrough()
+        return True
+
+    def unregister_passthrough(self, hotkey: str) -> None:
+        with self._lock:
+            self._passthrough_bindings.pop(hotkey, None)
+        if self._running:
+            self._rebuild_passthrough()
+
+    def _rebuild_passthrough(self) -> None:
+        if not IS_WINDOWS:
+            return
+
+        try:
+            from .win32_hotkey import LowLevelKeyboardHook, _parse_hotkey_to_vk
+        except ImportError:
+            logger.warning("LowLevelKeyboardHook not available for passthrough hotkeys")
+            return
+
+        with self._lock:
+            bindings_snapshot = dict(self._passthrough_bindings)
+            active_event = self._active
+
+        if not bindings_snapshot:
+            if self._ll_hook is not None:
+                self._ll_hook.stop()
+                self._ll_hook = None
+            return
+
+        if self._ll_hook is None:
+            self._ll_hook = LowLevelKeyboardHook()
+
+        self._ll_hook.clear()
+
+        for hotkey, callback in bindings_snapshot.items():
+            try:
+                pynput_key = convert_hotkey_str(hotkey)
+            except ValueError:
+                logger.error("Invalid passthrough hotkey '%s'", hotkey)
+                continue
+
+            parsed = _parse_hotkey_to_vk(pynput_key)
+            if parsed is None:
+                logger.error("Failed to parse passthrough hotkey '%s'", hotkey)
+                continue
+
+            modifiers, vk = parsed
+
+            def _make_active_cb(cb: Callable[[], None], evt: threading.Event) -> Callable[[], None]:
+                def _wrapped() -> None:
+                    if not evt.is_set():
+                        return
+                    cb()
+                return _wrapped
+
+            wrapped = _make_active_cb(callback, active_event)
+            self._ll_hook.register(modifiers, vk, wrapped)
+
+        self._ll_hook.start()
+        logger.info("Passthrough hotkey hook rebuilt with %d bindings", len(bindings_snapshot))
 
     def get_status(self) -> dict:
         with self._lock:

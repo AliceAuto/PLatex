@@ -134,6 +134,21 @@ def build_appimage(version: str) -> Path:
         env = os.environ.copy()
         env["ARCH"] = "x86_64"
 
+        try:
+            subprocess.check_call(
+                [str(tool_path), "--appimage-extract"],
+                cwd=str(Path(tmpdir)),
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            extracted_tool = Path(tmpdir) / "squashfs-root" / "AppRun"
+            if extracted_tool.exists():
+                tool_path = extracted_tool
+                print(f"[linux] Using extracted appimagetool: {tool_path}")
+        except subprocess.CalledProcessError:
+            print("[linux] appimage-extract failed, using AppImage directly")
+
         cmd = [str(tool_path), str(APPDIR), str(output_path)]
         print(f"[linux] Running appimagetool: {' '.join(cmd)}")
         subprocess.check_call(cmd, cwd=str(ROOT), env=env)

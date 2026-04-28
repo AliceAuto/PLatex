@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import logging
 import threading
 import time
@@ -12,37 +11,24 @@ logger = logging.getLogger("platex.clipboard")
 _CF_UNICODETEXT = 13
 _GMEM_MOVEABLE = 0x0002
 
-_MAX_CLIPBOARD_ATTEMPTS = 20
-_CLIPBOARD_RETRY_DELAY_SECONDS = 0.08
-_MAX_VERIFY_ATTEMPTS = 5
-_CLIPBOARD_TOTAL_TIMEOUT = 10.0
+_MAX_CLIPBOARD_ATTEMPTS = 10
+_CLIPBOARD_RETRY_DELAY_SECONDS = 0.05
+_MAX_VERIFY_ATTEMPTS = 3
+_CLIPBOARD_TOTAL_TIMEOUT = 3.0
+_CLIPBOARD_LOCK_TIMEOUT = 2.0
 
 _clipboard_lock = threading.Lock()
 
 
-@contextmanager
-def _open_clipboard():
+def _try_open_clipboard() -> bool:
     if USER32 is None:
-        raise RuntimeError("Clipboard API not available on this platform")
+        return False
+    return bool(USER32.OpenClipboard(None))
 
-    last_error: Exception | None = None
-    for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
-        if USER32.OpenClipboard(None):
-            try:
-                yield
-            finally:
-                USER32.CloseClipboard()
-            return
 
-        last_error = RuntimeError("Unable to open Windows clipboard")
-        logger.debug(
-            "OpenClipboard attempt %s/%s failed",
-            attempt,
-            _MAX_CLIPBOARD_ATTEMPTS,
-        )
-        time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
-
-    raise RuntimeError("Unable to open Windows clipboard after retries") from last_error
+def _close_clipboard() -> None:
+    if USER32 is not None:
+        USER32.CloseClipboard()
 
 
 def _allocate_global_memory(data: bytes) -> int:
@@ -75,13 +61,21 @@ def _set_text_ctypes(text: str) -> None:
     ownership_transferred = False
 
     try:
-        with _clipboard_lock:
-            with _open_clipboard():
-                USER32.EmptyClipboard()
-                if not USER32.SetClipboardData(_CF_UNICODETEXT, handle):
-                    KERNEL32.GlobalFree(handle)
-                    raise RuntimeError("Unable to write text to Windows clipboard")
-                ownership_transferred = True
+        for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+            with _clipboard_lock:
+                if _try_open_clipboard():
+                    try:
+                        USER32.EmptyClipboard()
+                        if not USER32.SetClipboardData(_CF_UNICODETEXT, handle):
+                            KERNEL32.GlobalFree(handle)
+                            raise RuntimeError("Unable to write text to Windows clipboard")
+                        ownership_transferred = True
+                    finally:
+                        _close_clipboard()
+                    return
+            if attempt < _MAX_CLIPBOARD_ATTEMPTS:
+                time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
+        raise RuntimeError("Unable to open Windows clipboard after retries")
     except Exception:
         if not ownership_transferred:
             KERNEL32.GlobalFree(handle)
@@ -91,20 +85,27 @@ def _set_text_ctypes(text: str) -> None:
 def _read_text_ctypes() -> str:
     import ctypes
 
-    with _clipboard_lock:
-        with _open_clipboard():
-            handle = USER32.GetClipboardData(_CF_UNICODETEXT)
-            if not handle:
-                raise RuntimeError("Unable to read text from Windows clipboard")
+    for attempt in range(1, _MAX_CLIPBOARD_ATTEMPTS + 1):
+        with _clipboard_lock:
+            if _try_open_clipboard():
+                try:
+                    handle = USER32.GetClipboardData(_CF_UNICODETEXT)
+                    if not handle:
+                        raise RuntimeError("Unable to read text from Windows clipboard")
 
-            pointer = KERNEL32.GlobalLock(handle)
-            if not pointer:
-                raise RuntimeError("Unable to lock Windows clipboard text")
+                    pointer = KERNEL32.GlobalLock(handle)
+                    if not pointer:
+                        raise RuntimeError("Unable to lock Windows clipboard text")
 
-            try:
-                return ctypes.wstring_at(pointer)
-            finally:
-                KERNEL32.GlobalUnlock(handle)
+                    try:
+                        return ctypes.wstring_at(pointer)
+                    finally:
+                        KERNEL32.GlobalUnlock(handle)
+                finally:
+                    _close_clipboard()
+        if attempt < _MAX_CLIPBOARD_ATTEMPTS:
+            time.sleep(_CLIPBOARD_RETRY_DELAY_SECONDS * attempt)
+    raise RuntimeError("Unable to open Windows clipboard after retries")
 
 
 def _set_text_with_retry(text: str) -> None:

@@ -113,6 +113,18 @@ if IS_WINDOWS:
     _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
 
 
+def get_cursor_pos() -> tuple[int, int] | None:
+    if not IS_WINDOWS:
+        return None
+    try:
+        pt = wintypes.POINT()
+        if _user32.GetCursorPos(ctypes.byref(pt)):
+            return (int(pt.x), int(pt.y))
+    except Exception:
+        pass
+    return None
+
+
 def enable_dpi_awareness() -> None:
     if not IS_WINDOWS:
         return

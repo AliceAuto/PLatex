@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import logging
 import os
 from dataclasses import dataclass, field
@@ -86,6 +85,9 @@ class ScriptRegistry:
     def get_enabled_scripts(self) -> list[ScriptEntry]:
         return [e for e in self._entries.values() if e.enabled]
 
+    def clear(self) -> None:
+        self._entries.clear()
+
     def get_all_scripts(self) -> list[ScriptEntry]:
         return list(self._entries.values())
 
@@ -160,6 +162,11 @@ class ScriptRegistry:
             if isinstance(script, ScriptBase):
                 if script.name in self._entries:
                     existing_path = self._entries[script.name].source_path
+                    if existing_path is not None and existing_path.resolve() == resolved:
+                        logger.info("Reloading script '%s' from %s", script.name, path)
+                        entry = ScriptEntry(script=script, source_path=path)
+                        self._entries[script.name] = entry
+                        return entry
                     logger.warning(
                         "Script name '%s' from %s conflicts with already loaded script from %s; skipping",
                         script.name, path, existing_path,
@@ -175,6 +182,11 @@ class ScriptRegistry:
             adapter = _LegacyOcrAdapter(_module=module, _source_path=path)
             if adapter.name in self._entries:
                 existing_path = self._entries[adapter.name].source_path
+                if existing_path is not None and existing_path.resolve() == resolved:
+                    logger.info("Reloading legacy script '%s' from %s", adapter.name, path)
+                    entry = ScriptEntry(script=adapter, source_path=path)
+                    self._entries[adapter.name] = entry
+                    return entry
                 logger.warning(
                     "Script name '%s' from %s conflicts with already loaded script from %s; skipping",
                     adapter.name, path, existing_path,

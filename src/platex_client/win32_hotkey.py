@@ -26,6 +26,43 @@ MOD_WIN = 0x0008
 ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 ERROR_CLASS_ALREADY_EXISTS = 1410
 
+_WH_KEYBOARD_LL = 13
+_WM_KEYDOWN = 0x0100
+_WM_SYSKEYDOWN = 0x0104
+_WM_KEYUP = 0x0101
+_WM_SYSKEYUP = 0x0105
+_WM_LL_HOOK_QUIT = 0x0501
+
+_VK_SHIFT = 0x10
+_VK_CONTROL = 0x11
+_VK_MENU = 0x12
+_VK_LWIN = 0x5B
+_VK_RWIN = 0x5C
+
+_MODIFIER_VK_TO_FLAG = {
+    _VK_SHIFT: MOD_SHIFT,
+    _VK_CONTROL: MOD_CONTROL,
+    _VK_MENU: MOD_ALT,
+    0xA0: MOD_SHIFT,
+    0xA1: MOD_SHIFT,
+    0xA2: MOD_CONTROL,
+    0xA3: MOD_CONTROL,
+    0xA4: MOD_ALT,
+    0xA5: MOD_ALT,
+    _VK_LWIN: MOD_WIN,
+    _VK_RWIN: MOD_WIN,
+}
+
+
+class _KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
+
 _MAX_RETRY_COUNT = 10
 _MAX_RETRY_DELAY = 30.0
 
@@ -500,3 +537,242 @@ class Win32HotkeyListener:
             self._retry_timer = threading.Timer(delay, _retry)
             self._retry_timer.daemon = True
             self._retry_timer.start()
+
+
+def _parse_hotkey_to_vk(hotkey: str) -> tuple[int, int] | None:
+    parts = hotkey.lower().replace("<", "").replace(">", "").split("+")
+    parts = [p.strip() for p in parts if p.strip()]
+    if not parts:
+        return None
+
+    modifiers = 0
+    key_part = parts[-1]
+
+    _MODIFIER_NAMES = {"ctrl", "control", "alt", "shift", "win", "cmd", "super"}
+    if key_part in _MODIFIER_NAMES:
+        return None
+
+    for mod in parts[:-1]:
+        if mod in ("ctrl", "control"):
+            modifiers |= MOD_CONTROL
+        elif mod == "alt":
+            modifiers |= MOD_ALT
+        elif mod == "shift":
+            modifiers |= MOD_SHIFT
+        elif mod in ("win", "cmd", "super"):
+            modifiers |= MOD_WIN
+
+    vk_map = {
+        "0": 0x30, "1": 0x31, "2": 0x32, "3": 0x33, "4": 0x34,
+        "5": 0x35, "6": 0x36, "7": 0x37, "8": 0x38, "9": 0x39,
+        "a": 0x41, "b": 0x42, "c": 0x43, "d": 0x44, "e": 0x45,
+        "f": 0x46, "g": 0x47, "h": 0x48, "i": 0x49, "j": 0x4A,
+        "k": 0x4B, "l": 0x4C, "m": 0x4D, "n": 0x4E, "o": 0x4F,
+        "p": 0x50, "q": 0x51, "r": 0x52, "s": 0x53, "t": 0x54,
+        "u": 0x55, "v": 0x56, "w": 0x57, "x": 0x58, "y": 0x59,
+        "z": 0x5A,
+        "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74,
+        "f6": 0x75, "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79,
+        "f11": 0x7A, "f12": 0x7B,
+        "space": 0x20, "enter": 0x0D, "return": 0x0D, "tab": 0x09,
+        "escape": 0x1B, "esc": 0x1B, "backspace": 0x08, "delete": 0x2E,
+        "del": 0x2E, "insert": 0x2D, "ins": 0x2D, "home": 0x24, "end": 0x23,
+        "page_up": 0x21, "prior": 0x21, "pgup": 0x21,
+        "page_down": 0x22, "next": 0x22, "pgdown": 0x22, "pgdn": 0x22,
+        "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+        "caps_lock": 0x14, "capslock": 0x14,
+        "print_screen": 0x2C, "sysrq": 0x2C, "prtsc": 0x2C,
+        "scroll_lock": 0x91, "scrolllock": 0x91,
+        "pause": 0x13, "break": 0x13,
+        "num_lock": 0x90, "numlock": 0x90,
+        "menu": 0x5D,
+        "numpad0": 0x60, "numpad1": 0x61, "numpad2": 0x62,
+        "numpad3": 0x63, "numpad4": 0x64, "numpad5": 0x65, "numpad6": 0x66,
+        "numpad7": 0x67, "numpad8": 0x68, "numpad9": 0x69,
+        ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF,
+        "`": 0xC0, "[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE,
+    }
+
+    vk = vk_map.get(key_part)
+    if vk is None:
+        if len(key_part) == 1:
+            vk = ord(key_part.upper())
+        else:
+            return None
+
+    return modifiers, vk
+
+
+class LowLevelKeyboardHook:
+    def __init__(self) -> None:
+        self._hooks: dict[tuple[int, int], Callable[[], None]] = {}
+        self._hook_handle: Any = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.RLock()
+        self._current_modifiers: int = 0
+        self._pressed_keys: set[int] = set()
+        self._hook_proc_ref: Any = None
+        self._ready_event = threading.Event()
+
+    def register(self, modifiers: int, vk: int, callback: Callable[[], None]) -> None:
+        with self._lock:
+            self._hooks[(modifiers, vk)] = callback
+
+    def unregister(self, modifiers: int, vk: int) -> None:
+        with self._lock:
+            self._hooks.pop((modifiers, vk), None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._hooks.clear()
+
+    def start(self) -> None:
+        if not IS_WINDOWS or USER32 is None:
+            return
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._ready_event.clear()
+        self._thread = threading.Thread(
+            target=self._hook_loop, name="ll-keyboard-hook", daemon=True
+        )
+        self._thread.start()
+        self._ready_event.wait(timeout=5.0)
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            tid = self._thread.ident
+            if tid:
+                try:
+                    USER32.PostThreadMessageW(tid, _WM_LL_HOOK_QUIT, 0, 0)
+                except Exception:
+                    pass
+            self._thread.join(timeout=2.0)
+        self._thread = None
+        self._hook_handle = None
+
+    def _sync_modifier_state(self) -> None:
+        if USER32 is None:
+            return
+        self._current_modifiers = 0
+        for vk, mod_flag in _MODIFIER_VK_TO_FLAG.items():
+            if USER32.GetKeyState(vk) & 0x8000:
+                self._current_modifiers |= mod_flag
+
+    def _hook_loop(self) -> None:
+        if USER32 is None or KERNEL32 is None:
+            self._ready_event.set()
+            return
+
+        hook_proc_type = ctypes.CFUNCTYPE(
+            ctypes.c_ssize_t, ctypes.c_int, ctypes.c_ssize_t, ctypes.c_ssize_t
+        )
+
+        hook_self = self
+
+        @hook_proc_type
+        def hook_proc(nCode, wParam, lParam):
+            if nCode >= 0 and not hook_self._stop_event.is_set():
+                msg = int(wParam)
+                if msg in (_WM_KEYDOWN, _WM_SYSKEYDOWN):
+                    try:
+                        kb = ctypes.cast(lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
+                        hook_self._on_key_down(kb.vkCode)
+                    except Exception:
+                        logger.exception("Error in LL keyboard hook key-down handler")
+                elif msg in (_WM_KEYUP, _WM_SYSKEYUP):
+                    try:
+                        kb = ctypes.cast(lParam, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
+                        hook_self._on_key_up(kb.vkCode)
+                    except Exception:
+                        logger.exception("Error in LL keyboard hook key-up handler")
+
+            return USER32.CallNextHookEx(None, nCode, wParam, lParam)
+
+        self._hook_proc_ref = hook_proc
+
+        USER32.SetWindowsHookExW.restype = ctypes.c_void_p
+        USER32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD
+        ]
+        USER32.UnhookWindowsHookEx.restype = wintypes.BOOL
+        USER32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        USER32.CallNextHookEx.restype = ctypes.c_ssize_t
+        USER32.CallNextHookEx.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t, ctypes.c_ssize_t
+        ]
+
+        hinst = ctypes.pythonapi._handle
+        self._hook_handle = USER32.SetWindowsHookExW(
+            _WH_KEYBOARD_LL, hook_proc, hinst, 0
+        )
+
+        if not self._hook_handle:
+            err = ctypes.get_last_error()
+            logger.error("Failed to install low-level keyboard hook: error %d", err)
+            self._ready_event.set()
+            return
+
+        self._sync_modifier_state()
+
+        msg = wintypes.MSG()
+        USER32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)
+
+        self._ready_event.set()
+        logger.info("Low-level keyboard hook installed with %d bindings", len(self._hooks))
+
+        try:
+            while not self._stop_event.is_set():
+                ret = USER32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+                if ret == 0 or ret == -1:
+                    break
+                if msg.message == _WM_LL_HOOK_QUIT:
+                    break
+                USER32.TranslateMessage(ctypes.byref(msg))
+                USER32.DispatchMessageW(ctypes.byref(msg))
+        except Exception:
+            logger.exception("Error in low-level keyboard hook message loop")
+        finally:
+            if self._hook_handle:
+                try:
+                    USER32.UnhookWindowsHookEx(self._hook_handle)
+                except Exception:
+                    pass
+                self._hook_handle = None
+            self._hook_proc_ref = None
+            self._pressed_keys.clear()
+            self._current_modifiers = 0
+            logger.info("Low-level keyboard hook removed")
+
+    def _on_key_down(self, vk: int) -> None:
+        mod_flag = _MODIFIER_VK_TO_FLAG.get(vk)
+        if mod_flag:
+            self._current_modifiers |= mod_flag
+
+        if vk in self._pressed_keys:
+            return
+        self._pressed_keys.add(vk)
+
+        with self._lock:
+            callback = self._hooks.get((self._current_modifiers, vk))
+
+        if callback is not None:
+            try:
+                callback()
+            except Exception:
+                logger.exception("Error in low-level keyboard hook callback")
+
+    def _on_key_up(self, vk: int) -> None:
+        mod_flag = _MODIFIER_VK_TO_FLAG.get(vk)
+        if mod_flag:
+            other_vk_pressed = False
+            for other_vk, other_flag in _MODIFIER_VK_TO_FLAG.items():
+                if other_vk != vk and other_flag == mod_flag and other_vk in self._pressed_keys:
+                    other_vk_pressed = True
+                    break
+            if not other_vk_pressed:
+                self._current_modifiers &= ~mod_flag
+
+        self._pressed_keys.discard(vk)

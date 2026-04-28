@@ -16,8 +16,8 @@ _MAX_QUEUE_SIZE = 50
 
 class PopupManager:
     def __init__(self, bus: EventBus | None = None) -> None:
-        self._popup_queue: queue.Queue[tuple[str, str, int] | None] = queue.Queue()
-        self._panel_queue: queue.Queue[str | None] = queue.Queue()
+        self._popup_queue: queue.Queue[tuple[str, str, int] | None] = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
+        self._panel_queue: queue.Queue[str | None] = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._stop_event = threading.Event()
         self._shutdown_confirmed = threading.Event()
         self._shutdown_lock = threading.Lock()
@@ -70,7 +70,14 @@ class PopupManager:
         try:
             self._popup_queue.put_nowait((title, latex, timeout_ms))
         except queue.Full:
-            logger.warning("Popup queue full, dropping popup for hash=%s", latex[:10] if latex else "")
+            try:
+                self._popup_queue.get_nowait()
+            except queue.Empty:
+                pass
+            try:
+                self._popup_queue.put_nowait((title, latex, timeout_ms))
+            except queue.Full:
+                logger.warning("Popup queue still full after drain, dropping popup")
 
     def open_panel(self) -> None:
         if self._stop_event.is_set():
@@ -83,6 +90,9 @@ class PopupManager:
 
     def subscribe_ocr_events(self) -> None:
         self._bus.subscribe(OcrSuccessEvent, self._on_ocr_success)
+
+    def unsubscribe_ocr_events(self) -> None:
+        self._bus.unsubscribe(OcrSuccessEvent, self._on_ocr_success)
 
     def _on_ocr_success(self, event: OcrSuccessEvent) -> None:
         self.show_popup("PLatex OCR Success", event.latex)

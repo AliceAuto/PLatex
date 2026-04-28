@@ -6,6 +6,7 @@ from typing import Any
 
 from platex_client.script_base import ScriptBase
 from platex_client.hotkey_listener import simulate_click
+from platex_client.platform_utils import get_cursor_pos
 
 logger = logging.getLogger("platex.scripts.hotkey_click")
 
@@ -35,6 +36,10 @@ class HotkeyClickScript(ScriptBase):
     @property
     def description(self) -> str:
         return "\u901a\u8fc7\u5168\u5c40\u5feb\u6377\u952e\u77ac\u95f4\u79fb\u52a8\u9f20\u6807\u5230\u6307\u5b9a\u4f4d\u7f6e\u5e76\u70b9\u51fb\uff0c\u7136\u540e\u6062\u590d\u539f\u4f4d\u3002\u652f\u6301\u914d\u7f6e\u7ec4\u7ed1\u5b9a\u7a97\u53e3\uff0c\u9ed8\u8ba4\u7ec4\u5728\u4efb\u610f\u7a97\u53e3\u53ef\u7528\u3002"
+
+    @property
+    def passthrough_hotkeys(self) -> bool:
+        return True
 
     def get_hotkey_bindings(self) -> dict[str, str]:
         result: dict[str, str] = {}
@@ -179,7 +184,7 @@ class HotkeyClickScript(ScriptBase):
                 )
                 self._label.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 self._label.setStyleSheet(
-                    "font-size: 28px; color: white; background: rgba(0,0,0,160);"
+                    "font-size: 28px; color: rgba(255, 255, 255, 230); background: rgba(0, 0, 0, 160);"
                     "border-radius: 16px; padding: 30px;"
                 )
                 self._label.adjustSize()
@@ -197,18 +202,9 @@ class HotkeyClickScript(ScriptBase):
             def mousePressEvent(self, event) -> None:  # noqa: N802
                 picked_x: int | None = None
                 picked_y: int | None = None
-                try:
-                    import ctypes
-
-                    class _POINT(ctypes.Structure):
-                        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-                    pt = _POINT()
-                    if ctypes.WinDLL("user32", use_last_error=True).GetCursorPos(ctypes.byref(pt)):
-                        picked_x, picked_y = int(pt.x), int(pt.y)
-                except Exception:
-                    picked_x = None
-                    picked_y = None
+                cursor = get_cursor_pos()
+                if cursor is not None:
+                    picked_x, picked_y = cursor
 
                 if picked_x is None or picked_y is None:
                     pos = event.globalPosition()
@@ -229,13 +225,14 @@ class HotkeyClickScript(ScriptBase):
                 self.entry = dict(entry)
                 self.setFrameShape(QFrame.Shape.StyledPanel)
                 self.setStyleSheet(
-                    "QFrame { border: 1px solid rgba(100, 116, 148, 70); border-radius: 6px; background: #24253a; padding: 2px; }"
-                    "QFrame QLabel { color: #b8c0dc; background: transparent; }"
-                    "QSpinBox { padding: 2px 6px; border: 1px solid rgba(100, 116, 148, 70); border-radius: 3px; background: #282940; color: #b8c0dc; }"
-                    "QSpinBox::up-button, QSpinBox::down-button { background: #282940; border: none; width: 16px; }"
-                    "QComboBox { padding: 2px 8px; border: 1px solid rgba(100, 116, 148, 70); border-radius: 3px; background: #282940; color: #b8c0dc; }"
-                    "QComboBox QAbstractItemView { background: #1c1c2e; color: #b8c0dc; border: 1px solid rgba(100, 116, 148, 70); selection-background-color: rgba(100, 140, 200, 80); }"
-                    "QKeySequenceEdit { padding: 2px 8px; border: 1px solid rgba(100, 116, 148, 70); border-radius: 3px; background: #282940; color: #b8c0dc; }"
+                    "QFrame { border: 1px solid rgba(120, 140, 180, 40); border-radius: 8px; background: rgba(36, 38, 58, 140); padding: 2px; }"
+                    "QFrame QLabel { color: rgba(184, 192, 220, 220); background: transparent; }"
+                    "QSpinBox { padding: 3px 8px; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(184, 192, 220, 220); }"
+                    "QSpinBox::up-button, QSpinBox::down-button { background: rgba(40, 42, 64, 160); border: none; width: 16px; }"
+                    "QSpinBox::up-button:hover, QSpinBox::down-button:hover { background: rgba(55, 58, 85, 200); }"
+                    "QComboBox { padding: 3px 10px; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(184, 192, 220, 220); }"
+                    "QComboBox QAbstractItemView { background: rgba(30, 30, 48, 240); color: rgba(184, 192, 220, 220); border: 1px solid rgba(120, 140, 180, 50); selection-background-color: rgba(80, 140, 220, 80); }"
+                    "QKeySequenceEdit { padding: 3px 10px; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(184, 192, 220, 220); }"
                 )
 
                 outer = QVBoxLayout(self)
@@ -271,8 +268,8 @@ class HotkeyClickScript(ScriptBase):
                 btn_remove.setFixedSize(28, 28)
                 btn_remove.setToolTip("\u5220\u9664\u6b64\u5feb\u6377\u952e")
                 btn_remove.setStyleSheet(
-                    "QPushButton { color: #d4787e; font-weight: bold; border: 1px solid rgba(100, 116, 148, 70); border-radius: 4px; background: #282940; }"
-                    "QPushButton:hover { background: #32334c; }"
+                    "QPushButton { color: rgba(212, 120, 126, 220); font-weight: bold; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); }"
+                    "QPushButton:hover { background: rgba(55, 58, 85, 200); }"
                 )
                 btn_remove.clicked.connect(lambda: self.removed.emit(self))
                 row1.addWidget(btn_remove)
@@ -304,8 +301,8 @@ class HotkeyClickScript(ScriptBase):
                 btn_pick.setToolTip("\u70b9\u51fb\u540e\u5728\u5c4f\u5e55\u4e0a\u70b9\u51fb\u9009\u62e9\u76ee\u6807\u4f4d\u7f6e")
                 btn_pick.setMinimumWidth(100)
                 btn_pick.setStyleSheet(
-                    "QPushButton { padding: 4px 12px; border: 1px solid rgba(100, 140, 200, 100); border-radius: 4px; background: #282940; color: #7ba2d4; }"
-                    "QPushButton:hover { background: #32334c; }"
+                    "QPushButton { padding: 4px 12px; border: 1px solid rgba(80, 140, 220, 100); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(140, 180, 240, 230); }"
+                    "QPushButton:hover { background: rgba(55, 58, 85, 200); }"
                 )
                 btn_pick.clicked.connect(self._pick_position)
                 row2.addWidget(btn_pick)
@@ -324,7 +321,8 @@ class HotkeyClickScript(ScriptBase):
                 self._remark_edit.setPlaceholderText("\u4e3a\u6b64\u5feb\u6377\u952e\u6dfb\u52a0\u5907\u6ce8\uff0c\u65b9\u4fbf\u8bc6\u522b")
                 self._remark_edit.setText(str(entry.get("remark", "")))
                 self._remark_edit.setStyleSheet(
-                    "QLineEdit { padding: 4px 8px; border: 1px solid rgba(100, 116, 148, 70); border-radius: 4px; background: #282940; color: #b8c0dc; }"
+                    "QLineEdit { padding: 4px 10px; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(184, 192, 220, 220); }"
+                    "QLineEdit:focus { border-color: rgba(80, 140, 220, 150); }"
                 )
                 self._remark_edit.textChanged.connect(self._on_value_changed)
                 row3.addWidget(self._remark_edit, 1)
@@ -391,7 +389,7 @@ class HotkeyClickScript(ScriptBase):
                     "\u89e6\u53d1\u5feb\u6377\u952e\u540e\uff0c\u9f20\u6807\u77ac\u95f4\u79fb\u52a8\u5230\u76ee\u6807\u4f4d\u7f6e\u5e76\u70b9\u51fb\uff0c\u7136\u540e\u6062\u590d\u539f\u4f4d\u3002\n"
                     "\u53ef\u521b\u5efa\u591a\u4e2a\u914d\u7f6e\u7ec4\uff0c\u6bcf\u4e2a\u914d\u7f6e\u7ec4\u7ed1\u5b9a\u6307\u5b9a\u7a97\u53e3\uff0c\u9ed8\u8ba4\u914d\u7f6e\u7ec4\u5728\u4efb\u610f\u7a97\u53e3\u53ef\u7528\u3002"
                 )
-                header.setStyleSheet("font-size: 13px; color: #8a90a8; margin-bottom: 8px;")
+                header.setStyleSheet("font-size: 13px; color: rgba(138, 144, 168, 200); margin-bottom: 8px;")
                 header.setWordWrap(True)
                 main_layout.addWidget(header)
 
@@ -402,24 +400,24 @@ class HotkeyClickScript(ScriptBase):
                 self._group_combo = QComboBox()
                 self._group_combo.setMinimumWidth(120)
                 self._group_combo.setStyleSheet(
-                    "QComboBox { padding: 4px 8px; border: 1px solid rgba(100, 116, 148, 70); border-radius: 4px; background: #282940; color: #b8c0dc; }"
-                    "QComboBox QAbstractItemView { background: #1c1c2e; color: #b8c0dc; border: 1px solid rgba(100, 116, 148, 70); selection-background-color: rgba(100, 140, 200, 80); }"
+                    "QComboBox { padding: 4px 10px; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(184, 192, 220, 220); }"
+                    "QComboBox QAbstractItemView { background: rgba(30, 30, 48, 240); color: rgba(184, 192, 220, 220); border: 1px solid rgba(120, 140, 180, 50); selection-background-color: rgba(80, 140, 220, 80); }"
                 )
                 self._group_combo.currentIndexChanged.connect(self._on_group_changed)
                 group_row.addWidget(self._group_combo, 1)
 
                 btn_add_group = QPushButton("\u2795 \u6dfb\u52a0\u7ec4")
                 btn_add_group.setStyleSheet(
-                    "QPushButton { padding: 4px 10px; border: 1px solid rgba(100, 140, 200, 100); border-radius: 4px; background: #282940; color: #7ba2d4; }"
-                    "QPushButton:hover { background: #32334c; }"
+                    "QPushButton { padding: 4px 10px; border: 1px solid rgba(80, 140, 220, 100); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(140, 180, 240, 230); }"
+                    "QPushButton:hover { background: rgba(55, 58, 85, 200); }"
                 )
                 btn_add_group.clicked.connect(self._add_group)
                 group_row.addWidget(btn_add_group)
 
                 btn_remove_group = QPushButton("\u2715 \u5220\u9664\u7ec4")
                 btn_remove_group.setStyleSheet(
-                    "QPushButton { padding: 4px 10px; border: 1px solid rgba(100, 116, 148, 70); border-radius: 4px; background: #282940; color: #d4787e; }"
-                    "QPushButton:hover { background: #32334c; }"
+                    "QPushButton { padding: 4px 10px; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(212, 120, 126, 220); }"
+                    "QPushButton:hover { background: rgba(55, 58, 85, 200); }"
                 )
                 btn_remove_group.clicked.connect(self._remove_group)
                 group_row.addWidget(btn_remove_group)
@@ -433,7 +431,8 @@ class HotkeyClickScript(ScriptBase):
                 self._window_edit = QLineEdit()
                 self._window_edit.setPlaceholderText("\u7559\u7a7a\u8868\u793a\u5728\u4efb\u610f\u7a97\u53e3\u751f\u6548\uff08\u9ed8\u8ba4\u7ec4\uff09\uff0c\u586b\u5199\u7a97\u53e3\u6807\u9898\u5173\u952e\u8bcd\u7ed1\u5b9a\u7279\u5b9a\u7a97\u53e3")
                 self._window_edit.setStyleSheet(
-                    "QLineEdit { padding: 4px 8px; border: 1px solid rgba(100, 116, 148, 70); border-radius: 4px; background: #282940; color: #b8c0dc; }"
+                    "QLineEdit { padding: 4px 10px; border: 1px solid rgba(120, 140, 180, 50); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(184, 192, 220, 220); }"
+                    "QLineEdit:focus { border-color: rgba(80, 140, 220, 150); }"
                 )
                 self._window_edit.textChanged.connect(self._on_window_changed)
                 window_row.addWidget(self._window_edit, 1)
@@ -442,8 +441,8 @@ class HotkeyClickScript(ScriptBase):
                 self._btn_pick_window.setToolTip("\u70b9\u51fb\u540e\u6709 3 \u79d2\u65f6\u95f4\u5207\u6362\u5230\u76ee\u6807\u7a97\u53e3\uff0c\u81ea\u52a8\u83b7\u53d6\u7a97\u53e3\u6807\u9898")
                 self._btn_pick_window.setMinimumWidth(100)
                 self._btn_pick_window.setStyleSheet(
-                    "QPushButton { padding: 4px 12px; border: 1px solid rgba(100, 140, 200, 100); border-radius: 4px; background: #282940; color: #7ba2d4; }"
-                    "QPushButton:hover { background: #32334c; }"
+                    "QPushButton { padding: 4px 12px; border: 1px solid rgba(80, 140, 220, 100); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(140, 180, 240, 230); }"
+                    "QPushButton:hover { background: rgba(55, 58, 85, 200); }"
                 )
                 self._btn_pick_window.clicked.connect(self._pick_window)
                 window_row.addWidget(self._btn_pick_window)
@@ -455,8 +454,8 @@ class HotkeyClickScript(ScriptBase):
                 scroll.setFrameShape(QFrame.Shape.NoFrame)
                 scroll.setStyleSheet(
                     "QScrollArea { background: transparent; border: none; }"
-                    "QScrollBar:vertical { background: #1c1c2e; width: 8px; border-radius: 4px; }"
-                    "QScrollBar::handle:vertical { background: rgba(90, 95, 120, 140); min-height: 30px; border-radius: 4px; }"
+                    "QScrollBar:vertical { background: transparent; width: 6px; border-radius: 3px; }"
+                    "QScrollBar::handle:vertical { background: rgba(100, 110, 140, 100); min-height: 30px; border-radius: 3px; }"
                     "QScrollBar::handle:vertical:hover { background: rgba(100, 140, 200, 140); }"
                     "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
                 )
@@ -470,8 +469,8 @@ class HotkeyClickScript(ScriptBase):
 
                 btn_add = QPushButton("\u2795 \u6dfb\u52a0\u5feb\u6377\u952e")
                 btn_add.setStyleSheet(
-                    "QPushButton { padding: 8px 16px; font-size: 13px; border: 1px solid rgba(100, 140, 200, 100); border-radius: 4px; background: #282940; color: #7ba2d4; }"
-                    "QPushButton:hover { background: #32334c; }"
+                    "QPushButton { padding: 8px 16px; font-size: 13px; border: 1px solid rgba(80, 140, 220, 100); border-radius: 5px; background: rgba(40, 42, 64, 180); color: rgba(140, 180, 240, 230); }"
+                    "QPushButton:hover { background: rgba(55, 58, 85, 200); }"
                 )
                 btn_add.clicked.connect(self._add_entry)
                 main_layout.addWidget(btn_add)

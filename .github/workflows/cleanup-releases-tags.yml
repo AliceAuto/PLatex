@@ -1,28 +1,33 @@
 name: Cleanup Releases And Tags
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       tag_prefix:
         description: Tag prefix to clean (empty means all tags)
         required: false
         default: ""
+      dry_run:
+        description: Dry run (only list, do not delete)
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
 
 permissions:
   contents: write
 
 jobs:
   cleanup:
-    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[cleanup-now]')
     runs-on: ubuntu-latest
     steps:
       - name: Delete all releases
         uses: actions/github-script@v7
         with:
           script: |
+            const dryRun = core.getInput('dry_run') === 'true';
             const releases = await github.paginate(github.rest.repos.listReleases, {
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -30,18 +35,22 @@ jobs:
             });
             core.info(`Found ${releases.length} releases`);
             for (const rel of releases) {
-              core.info(`Deleting release ${rel.id} (${rel.tag_name})`);
-              await github.rest.repos.deleteRelease({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: rel.id,
-              });
+              core.info(`${dryRun ? '[DRY RUN] Would delete' : 'Deleting'} release ${rel.id} (${rel.tag_name})`);
+              if (!dryRun) {
+                await github.rest.repos.deleteRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: rel.id,
+                });
+              }
             }
+            core.info(`${dryRun ? '[DRY RUN] Would delete' : 'Deleted'} ${releases.length} releases`);
 
       - name: Delete tags by prefix
         uses: actions/github-script@v7
         with:
           script: |
+            const dryRun = core.getInput('dry_run') === 'true';
             const prefix = core.getInput('tag_prefix');
             const refs = await github.paginate(github.rest.git.listMatchingRefs, {
               owner: context.repo.owner,
@@ -55,10 +64,13 @@ jobs:
               .filter(ref => !prefix || ref.substring('refs/tags/'.length).startsWith(prefix));
             core.info(`Found ${tags.length} tags to delete`);
             for (const ref of tags) {
-              core.info(`Deleting ${ref}`);
-              await github.rest.git.deleteRef({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                ref: ref.substring('refs/'.length),
-              });
+              core.info(`${dryRun ? '[DRY RUN] Would delete' : 'Deleting'} ${ref}`);
+              if (!dryRun) {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: ref.substring('refs/'.length),
+                });
+              }
             }
+            core.info(`${dryRun ? '[DRY RUN] Would delete' : 'Deleted'} ${tags.length} tags`);

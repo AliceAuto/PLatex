@@ -107,3 +107,10 @@ tray_status_latest: "PLatex Client | {mode} | latest {hash}"
 tray_status_error: "PLatex Client | {mode} | last error {error}"
 
 tray_ocr_success_title: "PLatex OCR Success"
+
+btn_verify_api_key: "Verify"
+api_key_verify_empty: "✗ API Key cannot be empty"
+api_key_verify_masked: "✗ Please enter a new API Key (current value is masked)"
+api_key_verify_validating: "Verifying..."
+api_key_verify_success: "✓ API Key verified successfully"
+api_key_verify_failed: "✗ Verification failed: {error}"

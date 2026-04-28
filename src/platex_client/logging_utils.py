@@ -17,14 +17,26 @@ _SENSITIVE_PATTERNS = [
 class _SensitiveDataFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
+            masked_msg = record.msg
             for pattern, replacement in _SENSITIVE_PATTERNS:
-                record.msg = pattern.sub(replacement, record.msg)
+                masked_msg = pattern.sub(replacement, masked_msg)
+            if masked_msg != record.msg:
+                record.msg = masked_msg
         if record.args and isinstance(record.args, tuple):
-            record.args = tuple(
-                pattern.sub(replacement, arg) if isinstance(arg, str) else arg
-                for arg in record.args
-                for pattern, replacement in _SENSITIVE_PATTERNS
-            )
+            new_args = []
+            changed = False
+            for arg in record.args:
+                if isinstance(arg, str):
+                    masked_arg = arg
+                    for pattern, replacement in _SENSITIVE_PATTERNS:
+                        masked_arg = pattern.sub(replacement, masked_arg)
+                    if masked_arg != arg:
+                        changed = True
+                    new_args.append(masked_arg)
+                else:
+                    new_args.append(arg)
+            if changed:
+                record.args = tuple(new_args)
         return True
 
 
@@ -39,7 +51,7 @@ def setup_logging(log_file: Path, *, level: int = logging.INFO) -> None:
     )
 
     existing_file_handler = None
-    for handler in root_logger.handlers:
+    for handler in list(root_logger.handlers):
         if isinstance(handler, logging.FileHandler):
             existing_file_handler = handler
             break
@@ -55,10 +67,17 @@ def setup_logging(log_file: Path, *, level: int = logging.INFO) -> None:
         root_logger.removeHandler(existing_file_handler)
         existing_file_handler.close()
 
-    if not root_logger.handlers:
+    has_sensitive_filter = any(
+        isinstance(f, _SensitiveDataFilter) for f in root_logger.filters
+    )
+    if not has_sensitive_filter:
         root_logger.setLevel(level)
         root_logger.addFilter(_SensitiveDataFilter())
 
+    has_console_handler = any(
+        isinstance(h, RichHandler) for h in root_logger.handlers
+    )
+    if not has_console_handler:
         console_handler = RichHandler(
             show_time=True,
             show_path=False,

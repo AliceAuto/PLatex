@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +12,8 @@ from pathlib import Path
 from platformdirs import user_data_dir
 
 from .models import ClipboardEvent
+
+logger = logging.getLogger("platex.history")
 
 
 _MAX_FIELD_LENGTHS = {
@@ -22,6 +26,8 @@ _MAX_FIELD_LENGTHS = {
 
 _MAX_DB_SIZE_BYTES = 100 * 1024 * 1024
 _MAX_HISTORY_ROWS = 50000
+_VACUUM_CHECK_INTERVAL = 100
+_HEALTH_CHECK_INTERVAL = 50
 
 
 def _truncate_field(value: str, field_name: str) -> str:
@@ -36,6 +42,10 @@ class HistoryStore:
     db_path: Path | None = None
     _connection: sqlite3.Connection | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _insert_count: int = field(default=0, init=False, repr=False)
+    _operation_count: int = field(default=0, init=False, repr=False)
+    _last_health_check: float = field(default=0.0, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.db_path is None:
@@ -54,8 +64,16 @@ class HistoryStore:
 
     def _get_connection(self) -> sqlite3.Connection:
         if self._connection is not None:
+            self._operation_count += 1
+            needs_check = (
+                self._operation_count - self._last_health_check
+                >= _HEALTH_CHECK_INTERVAL
+            )
+            if not needs_check:
+                return self._connection
             try:
                 self._connection.execute("SELECT 1")
+                self._last_health_check = self._operation_count
                 return self._connection
             except Exception:
                 try:
@@ -67,40 +85,49 @@ class HistoryStore:
         last_exc: Exception | None = None
         for attempt in range(1, self._MAX_CONNECT_RETRIES + 1):
             try:
-                conn = sqlite3.connect(self.db_path, timeout=10)
+                conn = sqlite3.connect(self.db_path, timeout=10, check_same_thread=False)
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA journal_mode=WAL")
                 self._connection = conn
+                self._last_health_check = self._operation_count
                 return conn
             except Exception as exc:
                 last_exc = exc
                 if attempt < self._MAX_CONNECT_RETRIES:
-                    import time
                     time.sleep(0.1 * attempt)
 
         raise RuntimeError(f"Failed to connect to database after {self._MAX_CONNECT_RETRIES} attempts") from last_exc
 
     def _initialize(self) -> None:
         with self._lock:
-            conn = self._get_connection()
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS clipboard_history (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    image_hash TEXT NOT NULL,
-                    image_width INTEGER NOT NULL,
-                    image_height INTEGER NOT NULL,
-                    latex TEXT NOT NULL,
-                    source TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    error TEXT
+            try:
+                conn = self._get_connection()
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS clipboard_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        created_at TEXT NOT NULL,
+                        image_hash TEXT NOT NULL,
+                        image_width INTEGER NOT NULL,
+                        image_height INTEGER NOT NULL,
+                        latex TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        error TEXT
+                    )
+                    """
                 )
-                """
-            )
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_clipboard_history_created_at ON clipboard_history(created_at DESC)")
-            conn.commit()
-            self._restrict_db_file_permissions()
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_clipboard_history_created_at ON clipboard_history(created_at DESC)")
+                conn.commit()
+                self._restrict_db_file_permissions()
+            except Exception:
+                if self._connection is not None:
+                    try:
+                        self._connection.close()
+                    except Exception:
+                        pass
+                    self._connection = None
+                raise
 
     @staticmethod
     def _ensure_utc(dt: datetime) -> datetime:
@@ -110,6 +137,9 @@ class HistoryStore:
 
     def add(self, event: ClipboardEvent) -> None:
         with self._lock:
+            if self._closed:
+                logger.warning("Attempted to add event after HistoryStore was closed")
+                return
             conn = self._get_connection()
             conn.execute(
                 """
@@ -130,7 +160,10 @@ class HistoryStore:
                 ),
             )
             conn.commit()
-            self._auto_vacuum_if_needed(conn)
+            self._insert_count += 1
+            if self._insert_count >= _VACUUM_CHECK_INTERVAL:
+                self._insert_count = 0
+                self._auto_vacuum_if_needed(conn)
 
     def latest(self) -> ClipboardEvent | None:
         rows = self.list_recent(limit=1)
@@ -139,12 +172,18 @@ class HistoryStore:
     _MAX_QUERY_LIMIT = 10000
 
     def list_recent(self, limit: int = 20) -> list[ClipboardEvent]:
-        if not isinstance(limit, int) or limit < 1:
+        try:
+            limit = int(limit)
+        except (TypeError, ValueError):
+            limit = 20
+        if limit < 1:
             limit = 20
         if limit > self._MAX_QUERY_LIMIT:
             logger.warning("list_recent limit %d exceeds maximum %d, clamping", limit, self._MAX_QUERY_LIMIT)
             limit = self._MAX_QUERY_LIMIT
         with self._lock:
+            if self._closed:
+                return []
             conn = self._get_connection()
             cursor = conn.execute(
                 """
@@ -203,6 +242,9 @@ class HistoryStore:
         except AttributeError:
             return
         with lock:
+            if self._closed:
+                return
+            self._closed = True
             conn = self._connection
             if conn is not None:
                 try:

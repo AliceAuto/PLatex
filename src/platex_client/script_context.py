@@ -224,6 +224,8 @@ class SchedulerAPI:
         with self._lock:
             self._purge_cancelled()
             if len(self._tasks) >= self._MAX_TASKS:
+                self._purge_cancelled()
+            if len(self._tasks) >= self._MAX_TASKS:
                 raise RuntimeError(
                     f"Scheduler task limit reached ({self._MAX_TASKS}). "
                     "Cancel existing tasks before scheduling new ones."
@@ -259,6 +261,8 @@ class SchedulerAPI:
         with self._lock:
             self._purge_cancelled()
             if len(self._tasks) >= self._MAX_TASKS:
+                self._purge_cancelled()
+            if len(self._tasks) >= self._MAX_TASKS:
                 raise RuntimeError(
                     f"Scheduler task limit reached ({self._MAX_TASKS}). "
                     "Cancel existing tasks before scheduling new ones."
@@ -272,6 +276,8 @@ class SchedulerAPI:
         return task
 
     def _purge_cancelled(self) -> None:
+        if not self._tasks:
+            return
         self._tasks = [t for t in self._tasks if not t.is_cancelled]
 
     def cancel_all(self) -> None:

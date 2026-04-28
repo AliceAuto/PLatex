@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .app_state import AppState, StateMachine
-from .events import EventBus, OcrSuccessEvent, get_event_bus
+from .events import EventBus, get_event_bus
 from .history import HistoryStore
 from .hotkey_listener import HotkeyListener
 from .loader import load_script_processor
@@ -38,22 +38,7 @@ class PlatexApp:
     _external_history: HistoryStore | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._bus.subscribe(OcrSuccessEvent, self._on_ocr_success_event)
-
-    def _on_ocr_success_event(self, event: OcrSuccessEvent) -> None:
-        if self.on_ocr_success is None:
-            return
-        clipboard_event = ClipboardEvent(
-            created_at=datetime.now(timezone.utc),
-            image_hash=event.image_hash,
-            image_width=event.image_width,
-            image_height=event.image_height,
-            latex=event.latex,
-            source=event.source,
-            status="ok",
-            error=None,
-        )
-        self.on_ocr_success(clipboard_event)
+        pass
 
     @property
     def state(self) -> AppState:
@@ -62,6 +47,11 @@ class PlatexApp:
     @property
     def is_running(self) -> bool:
         return self._state_machine.is_running
+
+    def set_watcher_publishing(self, is_publishing: bool) -> None:
+        with self._watcher_lock:
+            if self._watcher is not None:
+                self._watcher.set_publishing(is_publishing)
 
     def set_external_history(self, history: HistoryStore) -> None:
         self._external_history = history
@@ -98,6 +88,11 @@ class PlatexApp:
             self._start_hotkeys()
         except Exception:
             self.logger.exception("Error during startup, forcing stop")
+            for entry in self.registry.get_all_scripts():
+                try:
+                    entry.script.deactivate()
+                except Exception:
+                    self.logger.debug("Failed to deactivate script %s during rollback", entry.script.name)
             self._state_machine.force_state(AppState.STOPPED)
             return
 
@@ -106,7 +101,7 @@ class PlatexApp:
                 self._ensure_watcher()
             except Exception:
                 self.logger.exception("Error creating watcher in isolate mode")
-                self._state_machine.force_state(AppState.STOPPED)
+                self._cleanup_on_start_failure()
                 return
             self._state_machine.transition_to(AppState.RUNNING)
             self.logger.info("Isolation mode enabled: background polling is disabled")
@@ -116,21 +111,36 @@ class PlatexApp:
             watcher = self._ensure_watcher()
         except Exception:
             self.logger.exception("Error creating watcher")
-            self._state_machine.force_state(AppState.STOPPED)
+            self._cleanup_on_start_failure()
             return
+
+        from .clipboard import set_publishing_callback
+
+        def _on_publishing(is_publishing: bool) -> None:
+            w = self._watcher
+            if w is not None:
+                try:
+                    w.set_publishing(is_publishing)
+                except Exception:
+                    pass
+
+        set_publishing_callback(_on_publishing)
 
         def run() -> None:
             consecutive_errors = 0
             max_consecutive_errors = 50
+
+            def _on_ocr_result(event: ClipboardEvent | None) -> None:
+                if event is not None and event.status == "ok" and self.on_ocr_success is not None:
+                    try:
+                        self.on_ocr_success(event)
+                    except Exception:
+                        self.logger.exception("Error in OCR success callback")
+
             while not self._stop_event.is_set():
                 try:
-                    event = watcher.poll_once()
+                    watcher.poll_once_async(callback=_on_ocr_result)
                     consecutive_errors = 0
-                    if event is not None and event.status == "ok" and self.on_ocr_success is not None:
-                        try:
-                            self.on_ocr_success(event)
-                        except Exception:
-                            self.logger.exception("Error in OCR success callback")
                 except Exception as exc:
                     consecutive_errors += 1
                     self.logger.exception("Error in clipboard poll loop: %s", exc)
@@ -147,6 +157,18 @@ class PlatexApp:
         self._worker = threading.Thread(target=run, name="platex-watcher", daemon=True)
         self._worker.start()
         self._state_machine.transition_to(AppState.RUNNING)
+
+    def _cleanup_on_start_failure(self) -> None:
+        try:
+            self.hotkey_listener.stop()
+        except Exception:
+            self.logger.debug("Failed to stop hotkey listener during cleanup")
+        for entry in self.registry.get_all_scripts():
+            try:
+                entry.script.deactivate()
+            except Exception:
+                self.logger.debug("Failed to deactivate script %s during cleanup", entry.script.name)
+        self._state_machine.force_state(AppState.STOPPED)
 
     def _start_registry(self) -> None:
         scripts_dir = default_scripts_dir()
@@ -174,12 +196,14 @@ class PlatexApp:
     def _start_hotkeys(self) -> None:
         self.logger.info("Starting hotkey registration")
         all_bindings: dict[str, Callable[[], None]] = {}
+        passthrough_bindings: dict[str, Callable[[], None]] = {}
         for entry in self.registry.get_hotkey_scripts():
             try:
                 bindings = entry.script.get_hotkey_bindings()
             except Exception as exc:
                 self.logger.exception("Failed to get hotkey bindings from %s: %s", entry.script.name, exc)
                 continue
+            is_passthrough = getattr(entry.script, 'passthrough_hotkeys', False)
             for hotkey, action in bindings.items():
                 script_ref = entry.script
 
@@ -191,13 +215,21 @@ class PlatexApp:
                             log.exception("Error in hotkey callback for %s", a)
                     return _cb
 
-                all_bindings[hotkey] = _make_cb(script_ref, action, self.logger)
+                callback = _make_cb(script_ref, action, self.logger)
+                if is_passthrough:
+                    passthrough_bindings[hotkey] = callback
+                else:
+                    all_bindings[hotkey] = callback
 
         self.logger.info("Starting hotkey listener")
         if all_bindings:
             self.hotkey_listener.register_many(all_bindings)
             for hotkey in all_bindings:
                 self.logger.info("Registered hotkey: %s", hotkey)
+
+        for hotkey, callback in passthrough_bindings.items():
+            self.hotkey_listener.register_passthrough(hotkey, callback)
+            self.logger.info("Registered passthrough hotkey: %s", hotkey)
 
         try:
             self.hotkey_listener.start()
@@ -206,19 +238,68 @@ class PlatexApp:
             self.logger.exception("Failed to start hotkey listener: %s", exc)
 
     def run_once(self):
-        with self._run_once_lock:
-            try:
-                watcher = self._ensure_watcher()
-                event = watcher.poll_once(force=True)
-            except Exception:
-                self.logger.exception("Error in run_once")
-                return None
-        if event is not None and event.status == "ok" and self.on_ocr_success is not None:
-            try:
-                self.on_ocr_success(event)
-            except Exception:
-                self.logger.exception("Error in OCR success callback")
-        return event
+        result_event = threading.Event()
+        result_holder: list[ClipboardEvent | None] = [None]
+
+        def _on_done(event: ClipboardEvent | None) -> None:
+            result_holder[0] = event
+            result_event.set()
+            if event is not None and event.status == "ok" and self.on_ocr_success is not None:
+                try:
+                    self.on_ocr_success(event)
+                except Exception:
+                    self.logger.exception("Error in OCR success callback")
+
+        try:
+            watcher = self._ensure_watcher()
+            started = watcher.poll_once_async(_on_done, force=True)
+        except Exception:
+            self.logger.exception("Error in run_once")
+            return None
+
+        if not started:
+            return None
+
+        if not result_event.wait(timeout=30.0):
+            self.logger.warning("run_once timed out after 30s, OCR continues in background")
+            return None
+
+        return result_holder[0]
+
+    def run_once_async(self, callback: Callable[[ClipboardEvent | None], None] | None = None) -> bool:
+        try:
+            watcher = self._ensure_watcher()
+        except Exception:
+            self.logger.exception("Error in run_once_async")
+            if callback is not None:
+                try:
+                    callback(None)
+                except Exception:
+                    pass
+            return False
+
+        def _on_ocr_done(event: ClipboardEvent | None) -> None:
+            if event is not None and event.status == "ok" and self.on_ocr_success is not None:
+                try:
+                    self.on_ocr_success(event)
+                except Exception:
+                    self.logger.exception("Error in OCR success callback")
+            if callback is not None:
+                try:
+                    callback(event)
+                except Exception:
+                    self.logger.exception("Error in run_once_async callback")
+
+        try:
+            return watcher.poll_once_async(_on_ocr_done, force=True)
+        except Exception:
+            self.logger.exception("Error starting async OCR")
+            if callback is not None:
+                try:
+                    callback(None)
+                except Exception:
+                    pass
+            return False
 
     def stop(self) -> None:
         if not self._state_machine.can_transition_to(AppState.STOPPING):
@@ -229,21 +310,38 @@ class PlatexApp:
         self._state_machine.transition_to(AppState.STOPPING)
         self.logger.info("Stopping background watcher")
         self._stop_event.set()
-        self.hotkey_listener.stop()
+        try:
+            from .clipboard import set_publishing_callback
+            set_publishing_callback(None)
+        except Exception:
+            pass
+        try:
+            self.hotkey_listener.stop()
+        except Exception:
+            self.logger.debug("Error stopping hotkey listener during shutdown", exc_info=True)
         for entry in self.registry.get_all_scripts():
             try:
                 entry.script.deactivate()
             except Exception as exc:
                 self.logger.debug("Failed to deactivate script %s: %s", entry.script.name, exc)
+        worker = self._worker
         if self._worker is not None:
             self._worker.join(timeout=2.0)
+            if self._worker.is_alive():
+                self.logger.warning("Worker thread still alive after 2s join, waiting longer...")
+                self._worker.join(timeout=3.0)
+                if self._worker.is_alive():
+                    self.logger.error(
+                        "Worker thread still alive after extended wait (daemon=True, will be killed on exit)"
+                    )
             self._worker = None
         with self._watcher_lock:
-            if self._watcher is not None:
+            watcher = self._watcher
+            if watcher is not None:
                 try:
                     if self._external_history is not None:
-                        self._watcher.history = None
-                    self._watcher.close()
+                        watcher.history = None
+                    watcher.close()
                 except Exception:
                     self.logger.debug("Error closing watcher during stop")
                 self._watcher = None
@@ -258,6 +356,7 @@ class PlatexApp:
     def restart_watcher(self, *, script_path: Path | None = None, interval: float | None = None, isolate_mode: bool | None = None) -> None:
         with self._restart_lock:
             was_running = self._state_machine.is_running
+            saved_configs = self.registry.save_configs()
             try:
                 self.stop()
             except Exception:
@@ -269,13 +368,30 @@ class PlatexApp:
                         self.logger.error("Old worker thread still alive after restart stop, aborting restart")
                         return
                     self._worker = None
-            finally:
-                if script_path is not None:
-                    self.script_path = script_path
-                if interval is not None:
-                    self.interval = interval
-                if isolate_mode is not None:
-                    self.isolate_mode = isolate_mode
-                self._stop_event.clear()
+
+            if script_path is not None:
+                self.script_path = script_path
+            if interval is not None:
+                clamped = max(0.1, min(60.0, interval))
+                if clamped != interval:
+                    if interval < 0.1:
+                        self.logger.warning("Interval %.3f is too small, clamping to %.1f", interval, clamped)
+                    else:
+                        self.logger.warning("Interval %.3f is too large, clamping to %.1f", interval, clamped)
+                self.interval = clamped
+            if isolate_mode is not None:
+                self.isolate_mode = isolate_mode
+            self.registry.clear()
+            self._stop_event.clear()
+            with self._watcher_lock:
+                if self._watcher is not None:
+                    try:
+                        self._watcher.close()
+                    except Exception:
+                        self.logger.debug("Error closing old watcher during restart")
+                    self._watcher = None
             if was_running:
-                self.start()
+                try:
+                    self.start(script_configs=saved_configs)
+                except Exception:
+                    self.logger.exception("Error starting watcher during restart")

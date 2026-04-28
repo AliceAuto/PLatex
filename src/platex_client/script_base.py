@@ -58,6 +58,10 @@ class ScriptBase(ABC):
     def on_hotkey(self, action: str) -> None:
         pass
 
+    @property
+    def passthrough_hotkeys(self) -> bool:
+        return False
+
     def set_hotkeys_changed_callback(self, callback: Callable[[], None] | None) -> None:
         self._hotkeys_changed_callback = callback
 

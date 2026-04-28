@@ -65,7 +65,8 @@ def _build_icon_image():
 
     for p in candidates:
         if p.exists():
-            return Image.open(p).convert("RGBA").resize((64, 64), Image.LANCZOS)
+            with Image.open(p) as img:
+                return img.convert("RGBA").resize((64, 64), Image.LANCZOS)
 
     from PIL import ImageDraw
 
@@ -282,13 +283,24 @@ class TrayController:
             logger.info("QApplication ready, setting up event loop")
             app.setQuitOnLastWindowClosed(False)
 
+            def _qt_exception_handler(exc_type, exc_value, exc_tb):
+                logger.critical("Unhandled exception in Qt event loop: %s: %s", exc_type.__name__, exc_value, exc_info=(exc_type, exc_value, exc_tb))
+
+            import traceback
+            original_excepthook = sys.excepthook
+            sys.excepthook = _qt_exception_handler
+
             from .ui.popup import Popup
             from .ui.control_panel import ControlPanel
 
             panel_window = None
             active_popups = []
-            active_popups_lock = threading.Lock()
+            active_popups_lock = threading.RLock()
             _MAX_ACTIVE_POPUPS = 10
+
+            def _clear_panel_ref(_obj=None) -> None:
+                nonlocal panel_window
+                panel_window = None
 
             def _handle_panel_commands() -> None:
                 nonlocal panel_window
@@ -303,6 +315,7 @@ class TrayController:
                         if panel_window is None or not panel_window.isVisible():
                             logger.info("Creating new control panel window")
                             panel_window = ControlPanel(controller_ref=self)
+                            panel_window.destroyed.connect(_clear_panel_ref)
                             panel_window.show()
                             logger.info("Control panel window shown")
                         else:
@@ -323,42 +336,47 @@ class TrayController:
                         app.quit()
                         return
 
-                    title, latex, timeout_ms = item
-                    preview = latex.replace("\n", " ").strip()
-                    if len(preview) > 220:
-                        preview = preview[:217] + "..."
-                    message = f"{preview or t('tray_ocr_completed')}{t('tray_popup_click_to_copy')}"
+                    try:
+                        title, latex, timeout_ms = item
+                        preview = latex.replace("\n", " ").strip()
+                        if len(preview) > 220:
+                            preview = preview[:217] + "..."
+                        message = f"{preview or t('tray_ocr_completed')}{t('tray_popup_click_to_copy')}"
 
-                    popup = Popup(title, message, latex)
-                    screen = app.primaryScreen()
-                    if screen is not None:
-                        available = screen.availableGeometry()
-                        x = max(available.left() + 8, available.right() - popup.width() - 20)
-                        y = available.top() + 24
-                        popup.move(x, y)
+                        popup = Popup(title, message, latex)
+                        screen = app.primaryScreen()
+                        if screen is not None:
+                            available = screen.availableGeometry()
+                            x = max(available.left() + 8, available.right() - popup.width() - 20)
+                            y = available.top() + 24
+                            popup.move(x, y)
 
-                    popup.setWindowOpacity(1.0)
-                    popup.show()
-                    popup.raise_()
-                    popup.activateWindow()
-                    popup.start_auto_fade(timeout_ms)
-                    with active_popups_lock:
-                        while len(active_popups) >= _MAX_ACTIVE_POPUPS:
-                            oldest = active_popups.pop(0)
+                        popup.setWindowOpacity(1.0)
+                        popup.show()
+                        popup.raise_()
+                        popup.start_auto_fade(timeout_ms)
+                        to_close = []
+                        with active_popups_lock:
+                            while len(active_popups) >= _MAX_ACTIVE_POPUPS:
+                                oldest = active_popups.pop(0)
+                                to_close.append(oldest)
+                            active_popups.append(popup)
+                        for old_popup in to_close:
                             try:
-                                oldest.close()
+                                old_popup.close()
                             except Exception:
                                 pass
-                        active_popups.append(popup)
 
-                    def _release_popup_ref(_obj=None, *, _popup=popup) -> None:
-                        with active_popups_lock:
-                            try:
-                                active_popups.remove(_popup)
-                            except ValueError:
-                                pass
+                        def _release_popup_ref(_obj=None, *, _popup=popup) -> None:
+                            with active_popups_lock:
+                                try:
+                                    active_popups.remove(_popup)
+                                except ValueError:
+                                    pass
 
-                    popup.destroyed.connect(_release_popup_ref)
+                        popup.destroyed.connect(_release_popup_ref)
+                    except Exception:
+                        logger.exception("Error creating/showing popup, skipping")
 
             pump_timer = QTimer()
             pump_timer.setInterval(16)
@@ -368,6 +386,7 @@ class TrayController:
             logger.info("Starting Qt event loop (app.exec)")
             app.exec()
             logger.info("Qt event loop exited")
+            sys.excepthook = original_excepthook
 
         def _panel_signal_loop() -> None:
             if panel_event_handle is None:
@@ -390,7 +409,10 @@ class TrayController:
             logger.info("open_panel_on_start=False, not opening panel automatically")
 
         def show_status() -> str:
-            latest = self.history.latest()
+            try:
+                latest = self.history.latest()
+            except Exception:
+                latest = None
             mode_str = t("tray_mode_isolated") if self.app.isolate_mode else t("tray_mode_watching")
             if latest is None:
                 return t("tray_status_waiting", mode=mode_str)
@@ -399,14 +421,25 @@ class TrayController:
             return self._limit_title(t("tray_status_error", mode=mode_str, error=latest.error))
 
         def ocr_once(_icon, _item) -> None:
-            event = self.app.run_once()
-            if event is None:
-                logger.info("Manual OCR once: no clipboard image found")
-            elif event.status == "ok":
-                logger.info("Manual OCR once success: %s", event.image_hash[:10])
-            else:
-                logger.warning("Manual OCR once failed: %s", event.error)
-            icon.title = show_status()
+            def _on_ocr_done(event: ClipboardEvent | None) -> None:
+                if event is None:
+                    logger.info("Manual OCR once: no clipboard image found")
+                elif event.status == "ok":
+                    logger.info("Manual OCR once success: %s", event.image_hash[:10])
+                else:
+                    logger.warning("Manual OCR once failed: %s", event.error)
+                try:
+                    icon.title = show_status()
+                except Exception:
+                    pass
+
+            started = self.app.run_once_async(callback=_on_ocr_done)
+            if not started:
+                logger.info("Manual OCR once: OCR already in progress or no image")
+                try:
+                    icon.title = show_status()
+                except Exception:
+                    pass
 
         def notify_success(event: ClipboardEvent) -> None:
             popup_manager.show_popup(t("tray_ocr_success_title"), event.latex)
@@ -447,7 +480,7 @@ class TrayController:
             logger.info("Tray exit requested")
             popup_manager.request_shutdown()
             try:
-                icon.stop()
+                threading.Thread(target=icon.stop, daemon=True).start()
             except Exception:
                 pass
             if force_exit_timer is None:
@@ -461,29 +494,47 @@ class TrayController:
         def toggle_watcher(_icon, item) -> None:
             if self.app.is_running:
                 logger.info("Stopping watcher from tray menu")
-                try:
-                    self.app.stop()
-                except Exception as exc:
-                    logger.exception("Error stopping watcher: %s", exc)
+
+                def _do_stop():
+                    try:
+                        self.app.stop()
+                    except Exception as exc:
+                        logger.exception("Error stopping watcher: %s", exc)
+                    try:
+                        icon.title = show_status()
+                    except Exception:
+                        pass
+
+                threading.Thread(target=_do_stop, daemon=True).start()
             else:
                 logger.info("Starting watcher from tray menu")
                 try:
                     self.app.start()
                 except Exception as exc:
                     logger.exception("Error starting watcher: %s", exc)
-            icon.title = show_status()
+                try:
+                    icon.title = show_status()
+                except Exception:
+                    pass
 
         def toggle_isolate_mode(_icon, item) -> None:
             new_mode = not self.app.isolate_mode
             logger.info("Toggling isolate_mode to %s from tray menu", new_mode)
-            try:
-                was_running = self.app.is_running
-                if was_running:
-                    self.app.stop()
-                self.app.restart_watcher(isolate_mode=new_mode)
-            except Exception as exc:
-                logger.exception("Error toggling isolate mode: %s", exc)
-            icon.title = show_status()
+
+            def _do_toggle():
+                try:
+                    was_running = self.app.is_running
+                    if was_running:
+                        self.app.stop()
+                    self.app.restart_watcher(isolate_mode=new_mode)
+                except Exception as exc:
+                    logger.exception("Error toggling isolate mode: %s", exc)
+                try:
+                    icon.title = show_status()
+                except Exception:
+                    pass
+
+            threading.Thread(target=_do_toggle, daemon=True).start()
 
         def toggle_startup(_icon, item) -> None:
             current = is_startup_enabled()

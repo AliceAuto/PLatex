@@ -14,7 +14,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -25,11 +24,12 @@ from ..i18n import t, on_language_changed, available_languages, switch_language
 from ..platform_utils import is_startup_enabled, set_startup_enabled
 from .glass_utils import HOTKEY_STATUS_STYLESHEET
 
+
 logger = logging.getLogger("platex.ui.general_tab")
 
 
 class GeneralTab(QWidget):
-    def __init__(self, controller_ref: object, tab_widget: QTabWidget, parent: QWidget | None = None) -> None:
+    def __init__(self, controller_ref: object, tab_widget: QWidget, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._controller = controller_ref
         self._tab_widget = tab_widget
@@ -76,7 +76,7 @@ class GeneralTab(QWidget):
         layout.addLayout(io_row)
 
         self._yaml_toggle_btn = QPushButton(t("btn_show_yaml"))
-        self._yaml_toggle_btn.setStyleSheet("QPushButton { font-size: 12px; color: #7ba2d4; border: none; text-align: left; padding: 4px 0; }")
+        self._yaml_toggle_btn.setObjectName("YamlToggleBtn")
         self._yaml_toggle_btn.setCheckable(True)
         layout.addWidget(self._yaml_toggle_btn)
 
