@@ -1,6 +1,7 @@
 window_title: "PLatex 控制面板"
 
 tab_general: "通用设置"
+tab_plugins: "插件"
 tab_log: 日志
 
 btn_save: "保存并应用"
@@ -114,3 +115,8 @@ api_key_verify_masked: "✗ 请输入新的 API Key（当前为掩码值）"
 api_key_verify_validating: "正在验证..."
 api_key_verify_success: "✓ API Key 验证通过"
 api_key_verify_failed: "✗ 验证失败: {error}"
+
+tooltip_theme_toggle: "切换日间/夜间主题"
+
+plugin_no_selection: "从左侧选择一个插件查看设置"
+plugin_no_settings: "此插件无可配置项"

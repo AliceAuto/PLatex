@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from .glass_utils import LOG_VIEWER_STYLESHEET
+from .glass_utils import LOG_VIEWER_STYLESHEET, build_log_viewer_stylesheet
 from ..i18n import t, on_language_changed
 
 logger = logging.getLogger("platex.ui.log_tab")
@@ -88,6 +88,9 @@ class LogTab(QWidget):
         self._controller = controller
         self._log_open_terminal_btn.clicked.connect(self._open_terminal)
         self._refresh_log()
+
+    def apply_theme(self, blend: float) -> None:
+        self._log_viewer.setStyleSheet(build_log_viewer_stylesheet(blend))
 
     def _refresh_log(self) -> None:
         if self._controller is None:

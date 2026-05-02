@@ -30,3 +30,17 @@ Thumbs.db
 config.yaml
 platex-client-test*.spec
 releases.json
+
+# Log files
+*.log
+
+# Debug / scratch test scripts at project root
+test_hotkey*.py
+test_win32_only.py
+_test_*.py
+_scan_result.txt
+
+# Temporary API response dumps
+actions_check.json
+artifacts.json
+rel_check*.json

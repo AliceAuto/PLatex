@@ -7,7 +7,7 @@ from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from ..clipboard import copy_text_to_clipboard
-from .glass_utils import enable_acrylic_for_window, POPUP_STYLESHEET
+from .glass_utils import enable_acrylic_for_window, POPUP_STYLESHEET, build_popup_stylesheet
 
 logger = logging.getLogger("platex.ui.popup")
 

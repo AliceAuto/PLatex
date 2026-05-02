@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtCore import QEasingCurve, QPropertyAnimation, Qt, QPoint, pyqtProperty
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -24,8 +24,18 @@ from ..i18n import t, on_language_changed, remove_language_callback
 from ..platform_utils import is_startup_enabled, set_startup_enabled
 from ..secrets import set_secret
 from .general_tab import GeneralTab
-from .glass_utils import GLASS_STYLESHEET, MacTitleBar, SegmentedTabBar, enable_acrylic_for_window
+from .glass_utils import (
+    GLASS_STYLESHEET,
+    MacTitleBar,
+    SegmentedTabBar,
+    ThemeToggleButton,
+    build_glass_stylesheet,
+    build_hotkey_status_stylesheet,
+    build_log_viewer_stylesheet,
+    enable_acrylic_for_window,
+)
 from .log_tab import LogTab
+from .plugins_tab import PluginsTab
 
 
 class ControlPanel(QWidget):
@@ -36,6 +46,8 @@ class ControlPanel(QWidget):
         self._resize_edge: str | None = None
         self._resize_start_pos: QPoint | None = None
         self._resize_start_geo = None
+        self._theme_blend = 0.0
+        self._theme_animation: QPropertyAnimation | None = None
         self.setObjectName("GlassRoot")
         self.setWindowTitle(t("window_title"))
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
@@ -59,6 +71,7 @@ class ControlPanel(QWidget):
         self._title_bar.close_clicked.connect(self.close)
         self._title_bar.minimize_clicked.connect(self.showMinimized)
         self._title_bar.maximize_clicked.connect(self._toggle_maximize)
+        self._title_bar.theme_button.theme_toggled.connect(self._on_theme_toggled)
         content_layout.addWidget(self._title_bar)
 
         body = QWidget()
@@ -75,9 +88,10 @@ class ControlPanel(QWidget):
         self._general_tab = GeneralTab(controller_ref, self._stacked)
         self._add_tab(self._general_tab, t("tab_general"))
 
-        self._script_tabs: dict[str, QWidget] = {}
-        self._script_tab_containers: dict[str, QWidget] = {}
-        self._create_script_tabs()
+        self._plugins_tab = PluginsTab(controller_ref)
+        self._plugins_tab.populate()
+        self._plugins_tab.script_settings_changed.connect(self._persist_script_settings)
+        self._add_tab(self._plugins_tab, t("tab_plugins"))
 
         self._log_tab = LogTab()
         self._log_tab.bind_controller(controller_ref)
@@ -111,6 +125,10 @@ class ControlPanel(QWidget):
 
         on_language_changed(self._on_language_changed)
 
+    @property
+    def _script_tabs(self) -> dict[str, QWidget]:
+        return self._plugins_tab.get_script_widgets()
+
     def _add_tab(self, widget: QWidget, label: str) -> None:
         self._stacked.addWidget(widget)
         self._segmented_bar.addTab(label)
@@ -124,6 +142,49 @@ class ControlPanel(QWidget):
             self.showNormal()
         else:
             self.showMaximized()
+
+    @pyqtProperty(float)
+    def theme_blend(self) -> float:
+        return self._theme_blend
+
+    @theme_blend.setter
+    def theme_blend(self, value: float) -> None:
+        self._theme_blend = value
+        self.setStyleSheet(build_glass_stylesheet(value))
+        self._title_bar.set_theme_blend(value)
+        if hasattr(self, '_general_tab') and self._general_tab is not None:
+            try:
+                hotkey_box = self._general_tab.findChild(QWidget, "HotkeyStatusBox")
+                if hotkey_box is not None:
+                    hotkey_box.setStyleSheet(build_hotkey_status_stylesheet(value))
+            except Exception:
+                pass
+        if hasattr(self, '_log_tab') and self._log_tab is not None:
+            try:
+                self._log_tab.apply_theme(value)
+            except Exception:
+                pass
+
+    def _on_theme_toggled(self, is_light: bool) -> None:
+        target = 1.0 if is_light else 0.0
+        if self._theme_animation is not None:
+            self._theme_animation.stop()
+        self._theme_animation = QPropertyAnimation(self, b"theme_blend")
+        self._theme_animation.setDuration(800)
+        self._theme_animation.setStartValue(self._theme_blend)
+        self._theme_animation.setEndValue(target)
+        self._theme_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._theme_animation.start()
+
+        try:
+            hwnd = int(self.winId())
+            if hwnd:
+                if is_light:
+                    enable_acrylic_for_window(hwnd, tint_color=0x99EBEEF8)
+                else:
+                    enable_acrylic_for_window(hwnd, tint_color=0x991E1E30)
+        except Exception:
+            pass
 
     def _detect_resize_edge(self, pos: QPoint) -> str | None:
         margin = 8
@@ -210,117 +271,31 @@ class ControlPanel(QWidget):
         title = t("window_title")
         self.setWindowTitle(title)
         self._title_bar.set_title(title)
+        self._title_bar.theme_button.setToolTip(t("tooltip_theme_toggle"))
         self._segmented_bar.setTabText(0, t("tab_general"))
+        self._segmented_bar.setTabText(1, t("tab_plugins"))
         self._segmented_bar.setTabText(self._segmented_bar.count() - 1, t("tab_log"))
         self._btn_save.setText(t("btn_save"))
         self._btn_terminal.setText(t("btn_terminal"))
         self._btn_close.setText(t("btn_close"))
         self._general_tab.retranslate_ui()
+        self._plugins_tab.retranslate_ui()
         self._log_tab.retranslate_ui()
 
     def closeEvent(self, event) -> None:
         remove_language_callback(self._on_language_changed)
+        self._plugins_tab.cleanup()
         if self._save_apply(show_result_message=False, restart_app=False):
             event.accept()
         else:
             event.ignore()
 
     def show_script_tab(self, script_name: str) -> None:
-        container = self._script_tab_containers.get(script_name)
-        if container is not None:
-            idx = self._stacked.indexOf(container)
-            if idx >= 0:
-                self._segmented_bar.setCurrentIndex(idx)
-                self._stacked.setCurrentIndex(idx)
-
-    def _create_script_tabs(self) -> None:
-        registry = self._controller.app.registry
-        for entry in registry.get_all_scripts():
-            script = entry.script
-            try:
-                widget = script.create_settings_widget(self._stacked)
-            except Exception:
-                logger.exception("Failed to create settings widget for script %s", script.name)
-                widget = None
-
-            if widget is not None:
-                change_cb = getattr(widget, "set_settings_changed_callback", None)
-                if callable(change_cb):
-                    change_cb(self._persist_script_settings)
-
-                save_fn = getattr(widget, "save_settings", None)
-                if callable(save_fn):
-                    self._script_tabs[script.name] = widget
-
-                load_fn = getattr(widget, "load_settings", None)
-                if callable(load_fn):
-                    try:
-                        load_fn()
-                    except Exception:
-                        logger.exception("Failed to initialize script settings widget for %s", script.name)
-
-                container = QWidget()
-                container_layout = QVBoxLayout(container)
-                container_layout.setContentsMargins(0, 0, 0, 0)
-                container_layout.setSpacing(0)
-                container_layout.addWidget(widget, 1)
-
-                io_row = QHBoxLayout()
-                io_row.setContentsMargins(12, 4, 12, 8)
-                btn_import = QPushButton(t("btn_import_config"))
-                btn_export = QPushButton(t("btn_export_config"))
-
-                def _make_import(s=script, w=widget):
-                    def _do_import():
-                        try:
-                            from PyQt6.QtWidgets import QFileDialog, QMessageBox
-
-                            filepath, _ = QFileDialog.getOpenFileName(
-                                self, t("dialog_import_script", name=s.display_name), str(Path.cwd()),
-                                t("dialog_yaml_filter"),
-                            )
-                            if not filepath:
-                                return
-                            s.import_config(Path(filepath))
-                            load_fn = getattr(w, "load_settings", None)
-                            if callable(load_fn):
-                                load_fn()
-                            QMessageBox.information(self, t("msg_script_import_success"), t("msg_script_import_success_text", name=s.display_name))
-                        except Exception as exc:
-                            from PyQt6.QtWidgets import QMessageBox
-
-                            QMessageBox.warning(self, t("msg_script_import_failed"), str(exc))
-                    return _do_import
-
-                def _make_export(s=script):
-                    def _do_export():
-                        try:
-                            from PyQt6.QtWidgets import QFileDialog, QMessageBox
-
-                            filepath, _ = QFileDialog.getSaveFileName(
-                                self, t("dialog_export_script", name=s.display_name),
-                                str(Path.cwd() / f"{s.name}-config.yaml"),
-                                t("dialog_yaml_filter"),
-                            )
-                            if not filepath:
-                                return
-                            s.export_config(Path(filepath))
-                            QMessageBox.information(self, t("msg_script_export_success"), t("msg_script_export_success_text", path=filepath))
-                        except Exception as exc:
-                            from PyQt6.QtWidgets import QMessageBox
-
-                            QMessageBox.warning(self, t("msg_script_export_failed"), str(exc))
-                    return _do_export
-
-                btn_import.clicked.connect(_make_import())
-                btn_export.clicked.connect(_make_export())
-                io_row.addWidget(btn_import)
-                io_row.addWidget(btn_export)
-                io_row.addStretch()
-                container_layout.addLayout(io_row)
-
-                self._add_tab(container, script.display_name)
-                self._script_tab_containers[script.name] = container
+        plugins_idx = self._stacked.indexOf(self._plugins_tab)
+        if plugins_idx >= 0:
+            self._segmented_bar.setCurrentIndex(plugins_idx)
+            self._stacked.setCurrentIndex(plugins_idx)
+            self._plugins_tab.show_script(script_name)
 
     def _persist_script_settings(self) -> None:
         store = ConfigStore.instance()
@@ -362,7 +337,8 @@ class ControlPanel(QWidget):
             QMessageBox.warning(self, t("yaml_parse_failed"), str(exc))
             return False
 
-        for widget in self._script_tabs.values():
+        script_widgets = self._plugins_tab.get_script_widgets()
+        for widget in script_widgets.values():
             save_fn = getattr(widget, "save_settings", None)
             if callable(save_fn):
                 try:
@@ -409,7 +385,7 @@ class ControlPanel(QWidget):
             yaml_scripts_changed = edited_scripts != baseline_scripts
             if yaml_scripts_changed:
                 self._controller.app.registry.load_configs(edited_scripts)
-                for widget in self._script_tabs.values():
+                for widget in script_widgets.values():
                     load_fn = getattr(widget, "load_settings", None)
                     if callable(load_fn):
                         try:
@@ -459,7 +435,7 @@ class ControlPanel(QWidget):
         text = store.build_disk_yaml_text()
         self._general_tab.update_yaml_display(text)
 
-        for widget in self._script_tabs.values():
+        for widget in script_widgets.values():
             load_fn = getattr(widget, "load_settings", None)
             if callable(load_fn):
                 try:
