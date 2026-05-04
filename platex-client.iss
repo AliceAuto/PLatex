@@ -93,7 +93,7 @@ begin
 
   if FileExists(ConfigFile) then
   begin
-    if not FileCopy(ConfigFile, BackupDir + '\config.yaml') then
+    if not CopyFile(ConfigFile, BackupDir + '\config.yaml', False) then
       Log('BackupUserConfig: Failed to backup config.yaml')
     else
       Log('BackupUserConfig: Backed up config.yaml to ' + BackupDir);
@@ -110,7 +110,7 @@ begin
           if (FindRec.Name <> '.') and (FindRec.Name <> '..') then
           begin
             SrcFile := ConfigDir + '\scripts\' + FindRec.Name;
-            if not FileCopy(SrcFile, BackupDir + '\scripts\' + FindRec.Name) then
+            if not CopyFile(SrcFile, BackupDir + '\scripts\' + FindRec.Name, False) then
               Log('BackupUserConfig: Failed to backup script config: ' + FindRec.Name)
             else
               Log('BackupUserConfig: Backed up script config: ' + FindRec.Name);

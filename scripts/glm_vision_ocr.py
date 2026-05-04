@@ -32,7 +32,7 @@ _ALLOWED_URL_HOSTNAMES = {
 def _validate_base_url(url: str) -> str:
     url = url.strip()
     if not url:
-        return "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        raise ValueError("base_url is required but was not provided")
 
     parsed = urlparse(url)
     if parsed.scheme not in _ALLOWED_URL_SCHEMES:
@@ -145,8 +145,8 @@ class OcrScript(ScriptBase):
     def __init__(self) -> None:
         super().__init__()
         self._api_key: str | None = None
-        self._model: str = "glm-4.1v-thinking-flash"
-        self._base_url: str = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        self._model: str | None = None
+        self._base_url: str | None = None
 
     @property
     def name(self) -> str:
@@ -164,33 +164,22 @@ class OcrScript(ScriptBase):
         return True
 
     def load_config(self, config: dict[str, Any]) -> None:
-        from platex_client.secrets import get_secret
         api_key_val = config.get("api_key", "")
         if api_key_val and not re.match(r"^.{1,4}\*+$", api_key_val):
             self._api_key = api_key_val
-        else:
-            secret_key = get_secret("GLM_API_KEY") or os.getenv("GLM_API_KEY")
-            if secret_key:
-                self._api_key = secret_key
         if config.get("model"):
             self._model = config["model"]
-        else:
-            secret_model = get_secret("GLM_MODEL") or os.getenv("GLM_MODEL")
-            if secret_model:
-                self._model = secret_model
         if config.get("base_url"):
             self._base_url = _validate_base_url(config["base_url"])
-        else:
-            secret_url = get_secret("GLM_BASE_URL") or os.getenv("GLM_BASE_URL")
-            if secret_url:
-                self._base_url = _validate_base_url(secret_url)
 
     def save_config(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
         if self._api_key:
-            result["api_key"] = "********"
-        result["model"] = self._model
-        result["base_url"] = self._base_url
+            result["api_key"] = self._api_key
+        if self._model:
+            result["model"] = self._model
+        if self._base_url:
+            result["base_url"] = self._base_url
         return result
 
     def _is_vision_model(self, model: str) -> bool:
@@ -235,13 +224,17 @@ class OcrScript(ScriptBase):
     _RETRY_DELAY = 1.0
 
     def process_image(self, image_bytes: bytes, context: dict[str, object] | None = None) -> str:
-        from platex_client.secrets import get_secret
-        api_key = self._api_key or get_secret("GLM_API_KEY") or os.getenv("GLM_API_KEY")
+        api_key = self._api_key
         if not api_key:
-            raise RuntimeError("Please set GLM_API_KEY before starting the client.")
+            raise RuntimeError("API key not configured. Please set api_key in the OCR script config.")
 
         model = self._model
+        if not model:
+            raise RuntimeError("Model not configured. Please set model in the OCR script config.")
+
         base_url = self._base_url
+        if not base_url:
+            raise RuntimeError("Base URL not configured. Please set base_url in the OCR script config.")
 
         image_bytes, img_fmt = self._resize_image(image_bytes)
         image_base64 = base64.b64encode(image_bytes).decode("ascii")
@@ -443,8 +436,16 @@ class OcrScript(ScriptBase):
                 self._verify_status.setStyleSheet("color: rgba(138, 144, 168, 200); font-size: 12px;")
                 self._verify_status.setText(_t("api_key_verify_validating"))
 
-                model = self._model_edit.text().strip() or "glm-4.1v-thinking-flash"
-                base_url = self._base_url_edit.text().strip() or "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+                model = self._model_edit.text().strip()
+                if not model:
+                    self._verify_status.setStyleSheet("color: rgba(212, 120, 126, 220); font-size: 12px;")
+                    self._verify_status.setText("Model is required")
+                    return
+                base_url = self._base_url_edit.text().strip()
+                if not base_url:
+                    self._verify_status.setStyleSheet("color: rgba(212, 120, 126, 220); font-size: 12px;")
+                    self._verify_status.setText("Base URL is required")
+                    return
                 signals = self._validate_signals
 
                 def _run():
@@ -465,17 +466,13 @@ class OcrScript(ScriptBase):
                     self._verify_status.setText(_t("api_key_verify_failed", error=msg))
 
             def save_settings(self) -> None:
-                from platex_client.secrets import set_secret
                 script_ref._api_key = self._api_key_edit.text().strip() or None
-                script_ref._model = self._model_edit.text().strip() or "glm-4.1v-thinking-flash"
-                base_url_val = self._base_url_edit.text().strip() or "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-                script_ref._base_url = _validate_base_url(base_url_val)
-                if script_ref._api_key:
-                    set_secret("GLM_API_KEY", script_ref._api_key)
-                if script_ref._model:
-                    set_secret("GLM_MODEL", script_ref._model)
-                if script_ref._base_url:
-                    set_secret("GLM_BASE_URL", script_ref._base_url)
+                script_ref._model = self._model_edit.text().strip() or None
+                base_url_val = self._base_url_edit.text().strip()
+                if base_url_val:
+                    script_ref._base_url = _validate_base_url(base_url_val)
+                else:
+                    script_ref._base_url = None
 
         return _OcrSettingsWidget(parent)
 

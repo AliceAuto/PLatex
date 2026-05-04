@@ -203,6 +203,11 @@ class PlatexApp:
             except Exception as exc:
                 self.logger.exception("Failed to get hotkey bindings from %s: %s", entry.script.name, exc)
                 continue
+            self.logger.info("Script %s: passthrough=%s, bindings=%s, groups=%s",
+                             entry.script.name,
+                             getattr(entry.script, 'passthrough_hotkeys', False),
+                             bindings,
+                             getattr(entry.script, '_groups', 'N/A'))
             is_passthrough = getattr(entry.script, 'passthrough_hotkeys', False)
             for hotkey, action in bindings.items():
                 script_ref = entry.script
@@ -222,20 +227,24 @@ class PlatexApp:
                     all_bindings[hotkey] = callback
 
         self.logger.info("Starting hotkey listener")
-        if all_bindings:
-            self.hotkey_listener.register_many(all_bindings)
-            for hotkey in all_bindings:
-                self.logger.info("Registered hotkey: %s", hotkey)
-
-        for hotkey, callback in passthrough_bindings.items():
-            self.hotkey_listener.register_passthrough(hotkey, callback)
-            self.logger.info("Registered passthrough hotkey: %s", hotkey)
-
+        self.hotkey_listener.batch_begin()
         try:
-            self.hotkey_listener.start()
-            self.logger.info("Hotkey listener started successfully")
-        except Exception as exc:
-            self.logger.exception("Failed to start hotkey listener: %s", exc)
+            if all_bindings:
+                self.hotkey_listener.register_many(all_bindings)
+                for hotkey in all_bindings:
+                    self.logger.info("Registered hotkey: %s", hotkey)
+
+            for hotkey, callback in passthrough_bindings.items():
+                self.hotkey_listener.register_passthrough(hotkey, callback)
+                self.logger.info("Registered passthrough hotkey: %s", hotkey)
+
+            try:
+                self.hotkey_listener.start()
+                self.logger.info("Hotkey listener started successfully")
+            except Exception as exc:
+                self.logger.exception("Failed to start hotkey listener: %s", exc)
+        finally:
+            self.hotkey_listener.batch_end()
 
     def run_once(self):
         result_event = threading.Event()

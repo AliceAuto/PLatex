@@ -204,7 +204,11 @@ class GeneralTab(QWidget):
         new_path = Path(new_dir)
         try:
             set_config_dir(new_path)
+            ConfigStore.instance().reload()
             self._config_dir_edit.setText(str(new_path))
+            self._yaml_text = self._load_yaml_text()
+            self.yaml_editor.setPlainText(_hide_api_key(self._yaml_text))
+            self._sync_ui_from_yaml()
             QMessageBox.information(
                 self, t("msg_config_dir_changed"),
                 t("msg_config_dir_changed_text", path=new_path),
@@ -307,7 +311,9 @@ class GeneralTab(QWidget):
             return {}
         if not isinstance(loaded, dict):
             raise ValueError(t("yaml_parse_error"))
-        loaded = _fill_masked_api_keys(loaded)
+        store = ConfigStore.instance()
+        real_values = store.build_full_payload()
+        loaded = _fill_masked_api_keys(loaded, real_values)
         return loaded
 
     def parse_yaml(self) -> dict[str, Any]:

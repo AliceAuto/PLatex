@@ -24,32 +24,28 @@ class TestApplyEnvironment(unittest.TestCase):
         for key in ("GLM_API_KEY", "GLM_MODEL", "GLM_BASE_URL"):
             os.environ.pop(key, None)
 
-    def test_apply_environment_sets_secret_and_environ(self):
+    def test_apply_environment_does_not_set_secrets(self):
         cfg = AppConfig(glm_api_key="test-key-123")
         cfg.apply_environment()
-        self.assertTrue(has_secret("GLM_API_KEY"))
-        self.assertEqual(get_secret("GLM_API_KEY"), "test-key-123")
+        self.assertFalse(has_secret("GLM_API_KEY"))
         self.assertIsNone(os.environ.get("GLM_API_KEY"))
 
-    def test_apply_environment_no_overwrite_existing_secret(self):
+    def test_apply_environment_does_not_modify_existing_secret(self):
         set_secret("GLM_API_KEY", "existing-secret")
         cfg = AppConfig(glm_api_key="new-key")
         cfg.apply_environment()
         self.assertEqual(get_secret("GLM_API_KEY"), "existing-secret")
 
-    def test_apply_environment_overwrites_existing_environ(self):
-        """Bug #1: apply_environment() overwrites existing os.environ values.
+    def test_apply_environment_does_not_modify_existing_environ(self):
+        """apply_environment() is a no-op and does not modify os.environ.
         If GLM_API_KEY is already set in the environment (e.g. by the user
-        via system environment variables), apply_environment() will overwrite
-        it when has_secret() returns False. This is unexpected behavior -
-        user-set environment variables should take precedence."""
+        via system environment variables), apply_environment() will not
+        overwrite it since it no longer touches os.environ."""
         os.environ["GLM_API_KEY"] = "user-set-key"
         cfg = AppConfig(glm_api_key="config-key")
         cfg.apply_environment()
         result = os.environ.get("GLM_API_KEY")
-        self.assertNotEqual(result, "config-key",
-                            f"Bug #1: apply_environment() overwrote user-set env var. "
-                            f"Expected 'user-set-key', got '{result}'")
+        self.assertEqual(result, "user-set-key")
 
     def test_apply_environment_none_values(self):
         cfg = AppConfig()
@@ -824,42 +820,26 @@ class TestScriptBaseEdgeCases(unittest.TestCase):
 
 
 class TestFillMaskedApiKeys(unittest.TestCase):
-    def setUp(self):
-        clear_all()
-        for key in ("GLM_API_KEY",):
-            os.environ.pop(key, None)
+    """Tests for fill_masked_api_keys(data) — now a simple shallow copy."""
 
-    def tearDown(self):
-        clear_all()
-        for key in ("GLM_API_KEY",):
-            os.environ.pop(key, None)
-
-    def test_fill_masked_glm_api_key(self):
+    def test_returns_shallow_copy(self):
         from platex_client.api_key_masking import fill_masked_api_keys
-        set_secret("GLM_API_KEY", "real-key-123")
         data = {"glm_api_key": "********"}
         result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "real-key-123")
+        self.assertEqual(result, data)
+        self.assertIsNot(result, data)
 
-    def test_fill_non_masked_glm_api_key(self):
+    def test_preserves_non_masked_values(self):
         from platex_client.api_key_masking import fill_masked_api_keys
         data = {"glm_api_key": "actual-key"}
         result = fill_masked_api_keys(data)
         self.assertEqual(result["glm_api_key"], "actual-key")
 
-    def test_fill_masked_keeps_masked_when_no_secret(self):
+    def test_preserves_masked_values(self):
         from platex_client.api_key_masking import fill_masked_api_keys
         data = {"glm_api_key": "********"}
         result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "********",
-                         "Masked key should be kept when no secret is available")
-
-    def test_fill_partial_mask(self):
-        from platex_client.api_key_masking import fill_masked_api_keys
-        set_secret("GLM_API_KEY", "real-key-123")
-        data = {"glm_api_key": "sk-1****"}
-        result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "real-key-123")
+        self.assertEqual(result["glm_api_key"], "********")
 
 
 class TestAppConfigDefaults(unittest.TestCase):

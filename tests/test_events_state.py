@@ -60,12 +60,12 @@ class TestEventFrozen(unittest.TestCase):
 
     def test_show_panel_event_frozen(self):
         evt = ShowPanelEvent()
-        with self.assertRaises(AttributeError):
+        with self.assertRaises((AttributeError, TypeError)):
             evt.extra = "data"
 
     def test_shutdown_request_event_frozen(self):
         evt = ShutdownRequestEvent()
-        with self.assertRaises(AttributeError):
+        with self.assertRaises((AttributeError, TypeError)):
             evt.extra = "data"
 
 

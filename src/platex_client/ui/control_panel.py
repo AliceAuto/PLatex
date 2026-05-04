@@ -22,7 +22,6 @@ from ..config import ConfigStore
 from ..config_manager import ConfigManager
 from ..i18n import t, on_language_changed, remove_language_callback
 from ..platform_utils import is_startup_enabled, set_startup_enabled
-from ..secrets import set_secret
 from .general_tab import GeneralTab
 from .glass_utils import (
     GLASS_STYLESHEET,
@@ -170,7 +169,7 @@ class ControlPanel(QWidget):
         if self._theme_animation is not None:
             self._theme_animation.stop()
         self._theme_animation = QPropertyAnimation(self, b"theme_blend")
-        self._theme_animation.setDuration(800)
+        self._theme_animation.setDuration(400)
         self._theme_animation.setStartValue(self._theme_blend)
         self._theme_animation.setEndValue(target)
         self._theme_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
@@ -298,20 +297,50 @@ class ControlPanel(QWidget):
             self._plugins_tab.show_script(script_name)
 
     def _persist_script_settings(self) -> None:
+        logger.info("_persist_script_settings called, widgets=%s", list(self._plugins_tab.get_script_widgets().keys()))
+        script_widgets = self._plugins_tab.get_script_widgets()
+        for widget in script_widgets.values():
+            save_fn = getattr(widget, "save_settings", None)
+            if callable(save_fn):
+                try:
+                    save_fn()
+                except Exception:
+                    logger.exception("Failed to flush script settings from UI before persist")
+
         store = ConfigStore.instance()
-        try:
-            payload = self._general_tab.parse_yaml()
-        except Exception:
-            payload = store.build_full_payload()
+        payload = store.build_full_payload()
         script_configs = self._controller.app.registry.save_configs()
         payload["scripts"] = script_configs
 
-        store.request_update_and_save(payload)
+        registry = self._controller.app.registry
+        ocr_entries = registry.get_ocr_scripts()
+        for entry in ocr_entries:
+            ocr_config = entry.script.save_config()
+            api_key_val = ocr_config.get("api_key")
+            if api_key_val and not api_key_val.startswith("*"):
+                payload["glm_api_key"] = api_key_val
+            model_val = ocr_config.get("model")
+            if model_val:
+                payload["glm_model"] = model_val
+            base_url_val = ocr_config.get("base_url")
+            if base_url_val:
+                payload["glm_base_url"] = base_url_val
 
-        text = store.build_disk_yaml_text()
-        self._general_tab.update_yaml_display_if_unfocused(text)
+        try:
+            store.request_update_and_save(payload)
+        except Exception:
+            logger.exception("Failed to save script settings to disk")
 
-        self._controller.app.apply_registry_hotkeys()
+        try:
+            text = store.build_disk_yaml_text()
+            self._general_tab.update_yaml_display_if_unfocused(text)
+        except Exception:
+            logger.exception("Failed to update YAML display after persist")
+
+        try:
+            self._controller.app.apply_registry_hotkeys()
+        except Exception:
+            logger.exception("Failed to re-apply hotkeys after persist")
 
     def _open_terminal(self) -> None:
         from ..tray import _open_runtime_terminal
@@ -368,62 +397,69 @@ class ControlPanel(QWidget):
         payload["auto_start"] = auto_start
         payload["ui_language"] = ui_language
 
-        script_configs: dict[str, dict[str, Any]] = {}
-        if restart_app:
-            edited_scripts = payload.get("scripts")
-            if not isinstance(edited_scripts, dict):
-                edited_scripts = {}
+        from ..config import _restore_api_key, _fill_masked_api_keys
 
-            baseline_scripts: dict[str, Any] = {}
-            try:
-                baseline_loaded = yaml.safe_load(self._general_tab.get_yaml_text())
-                if isinstance(baseline_loaded, dict) and isinstance(baseline_loaded.get("scripts"), dict):
-                    baseline_scripts = baseline_loaded["scripts"]
-            except Exception:
-                baseline_scripts = {}
+        yaml_scripts_edited = False
+        edited_yaml_scripts: dict[str, Any] = {}
+        try:
+            edited_text = self._general_tab.yaml_editor.toPlainText()
+            baseline_text = self._general_tab.get_yaml_text()
+            restored_text = _restore_api_key(edited_text, baseline_text)
+            edited_loaded = yaml.safe_load(restored_text)
+            if isinstance(edited_loaded, dict) and isinstance(edited_loaded.get("scripts"), dict):
+                edited_yaml_scripts = edited_loaded["scripts"]
+                store = ConfigStore.instance()
+                real_values = store.build_full_payload()
+                edited_yaml_scripts = _fill_masked_api_keys(edited_yaml_scripts, real_values.get("scripts"))
+        except Exception:
+            edited_yaml_scripts = {}
 
-            yaml_scripts_changed = edited_scripts != baseline_scripts
-            if yaml_scripts_changed:
-                self._controller.app.registry.load_configs(edited_scripts)
-                for widget in script_widgets.values():
-                    load_fn = getattr(widget, "load_settings", None)
-                    if callable(load_fn):
-                        try:
-                            load_fn()
-                        except Exception:
-                            logger.exception("Failed to refresh script settings widget from YAML")
-                script_configs = self._controller.app.registry.save_configs()
-            else:
-                script_configs = self._controller.app.registry.save_configs()
-        else:
-            script_configs = self._controller.app.registry.save_configs()
+        baseline_yaml_scripts: dict[str, Any] = {}
+        try:
+            baseline_loaded = yaml.safe_load(baseline_text)
+            if isinstance(baseline_loaded, dict) and isinstance(baseline_loaded.get("scripts"), dict):
+                baseline_yaml_scripts = baseline_loaded["scripts"]
+                store = ConfigStore.instance()
+                real_values = store.build_full_payload()
+                baseline_yaml_scripts = _fill_masked_api_keys(baseline_yaml_scripts, real_values.get("scripts"))
+        except Exception:
+            baseline_yaml_scripts = {}
 
-        if script_configs:
-            payload["scripts"] = script_configs
+        if edited_yaml_scripts and edited_yaml_scripts != baseline_yaml_scripts:
+            self._controller.app.registry.load_configs(edited_yaml_scripts)
+            yaml_scripts_edited = True
+
+        script_configs = self._controller.app.registry.save_configs()
+        payload["scripts"] = script_configs
+
+        if yaml_scripts_edited:
+            for widget in script_widgets.values():
+                load_fn = getattr(widget, "load_settings", None)
+                if callable(load_fn):
+                    try:
+                        load_fn()
+                    except Exception:
+                        logger.exception("Failed to refresh script settings widget after config sync")
 
         registry = self._controller.app.registry
         ocr_entries = registry.get_ocr_scripts()
         for entry in ocr_entries:
             ocr_config = entry.script.save_config()
-            payload["glm_api_key"] = ocr_config.get("api_key", "")
-            payload["glm_model"] = ocr_config.get("model", "")
-            payload["glm_base_url"] = ocr_config.get("base_url", "")
+            api_key_val = ocr_config.get("api_key")
+            if api_key_val and not api_key_val.startswith("*"):
+                payload["glm_api_key"] = api_key_val
+            model_val = ocr_config.get("model")
+            if model_val:
+                payload["glm_model"] = model_val
+            base_url_val = ocr_config.get("base_url")
+            if base_url_val:
+                payload["glm_base_url"] = base_url_val
 
         try:
             set_startup_enabled(auto_start)
         except Exception as exc:
+            logger.warning("Failed to set auto-start: %s", exc)
             QMessageBox.warning(self, t("msg_auto_start_failed"), str(exc))
-            return False
-
-        glm_api_key = payload.get("glm_api_key")
-        glm_model = payload.get("glm_model")
-        glm_base_url = payload.get("glm_base_url")
-        if isinstance(glm_api_key, str) and glm_api_key and not glm_api_key.startswith("*"):
-            set_secret("GLM_API_KEY", glm_api_key)
-        if isinstance(glm_model, str) and glm_model:
-            set_secret("GLM_MODEL", glm_model)
-        if isinstance(glm_base_url, str) and glm_base_url:
-            set_secret("GLM_BASE_URL", glm_base_url)
 
         store = ConfigStore.instance()
         try:
@@ -434,14 +470,6 @@ class ControlPanel(QWidget):
 
         text = store.build_disk_yaml_text()
         self._general_tab.update_yaml_display(text)
-
-        for widget in script_widgets.values():
-            load_fn = getattr(widget, "load_settings", None)
-            if callable(load_fn):
-                try:
-                    load_fn()
-                except Exception:
-                    logger.exception("Failed to refresh script settings widget after save")
 
         if not restart_app:
             self._controller.app.apply_registry_hotkeys()
@@ -460,6 +488,10 @@ class ControlPanel(QWidget):
                     )
                 except Exception as exc:
                     logger.exception("Error restarting watcher: %s", exc)
+                    try:
+                        self._controller.app.apply_registry_hotkeys()
+                    except Exception:
+                        logger.exception("Failed to apply hotkeys after restart failure")
 
             restart_thread = threading.Thread(target=_do_restart, name="platex-restart", daemon=True)
             restart_thread.start()

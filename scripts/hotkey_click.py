@@ -21,9 +21,7 @@ class HotkeyClickScript(ScriptBase):
     """
 
     def __init__(self) -> None:
-        self._groups: list[dict[str, Any]] = [
-            {"name": "\u9ed8\u8ba4", "window": "", "entries": []}
-        ]
+        self._groups: list[dict[str, Any]] = []
 
     @property
     def name(self) -> str:
@@ -83,8 +81,25 @@ class HotkeyClickScript(ScriptBase):
     def _normalize_hotkey_string(value: Any) -> str:
         if not isinstance(value, str):
             return ""
-        normalized = value.split(",", 1)[0].strip()
-        return normalized
+        raw = value.split(",", 1)[0].strip()
+        if not raw:
+            return ""
+        parts = raw.split("+")
+        normalized_parts: list[str] = []
+        for part in parts:
+            p = part.strip()
+            lower = p.lower()
+            if lower in ("ctrl", "control"):
+                normalized_parts.append("Ctrl")
+            elif lower == "alt":
+                normalized_parts.append("Alt")
+            elif lower == "shift":
+                normalized_parts.append("Shift")
+            elif lower in ("win", "cmd", "super", "meta"):
+                normalized_parts.append("Win")
+            else:
+                normalized_parts.append(p)
+        return "+".join(normalized_parts)
 
     def _get_foreground_window_title(self) -> str:
         try:
@@ -110,13 +125,14 @@ class HotkeyClickScript(ScriptBase):
                         }
                         self._groups.append(group)
             if not self._groups:
-                self._groups = [{"name": "\u9ed8\u8ba4", "window": "", "entries": []}]
+                self._groups = []
         else:
             raw_entries = config.get("entries", [])
             if not isinstance(raw_entries, list):
                 raw_entries = []
             entries = [dict(e) if isinstance(e, dict) else {} for e in raw_entries]
-            self._groups = [{"name": "\u9ed8\u8ba4", "window": "", "entries": entries}]
+            if entries:
+                self._groups = [{"name": "", "window": "", "entries": entries}]
 
     def save_config(self) -> dict[str, Any]:
         return {"groups": self._groups}
@@ -223,6 +239,7 @@ class HotkeyClickScript(ScriptBase):
             def __init__(self, entry: dict[str, Any], parent: QWidget | None = None) -> None:
                 super().__init__(parent)
                 self.entry = dict(entry)
+                self.entry["hotkey"] = script_ref._normalize_hotkey_string(self.entry.get("hotkey", ""))
                 self.setFrameShape(QFrame.Shape.StyledPanel)
                 self.setStyleSheet(
                     "QFrame { border: 1px solid rgba(120, 140, 180, 40); border-radius: 8px; background: rgba(36, 38, 58, 140); padding: 2px; }"
@@ -333,7 +350,7 @@ class HotkeyClickScript(ScriptBase):
 
             def to_entry(self) -> dict[str, Any]:
                 return {
-                    "hotkey": self._hotkey_edit.keySequence().toString(),
+                    "hotkey": script_ref._normalize_hotkey_string(self._hotkey_edit.keySequence().toString()),
                     "x": self._x_spin.value(),
                     "y": self._y_spin.value(),
                     "button": self._button_combo.currentData(),
@@ -516,12 +533,30 @@ class HotkeyClickScript(ScriptBase):
                     self._syncing = False
 
             def _save_current_group(self) -> None:
+                import logging as _logging
+                _log = _logging.getLogger("platex.scripts.hotkey_click")
                 idx = self._current_group_index
+                _log.info("_save_current_group: idx=%s, num_groups=%s, num_entry_widgets=%s",
+                          idx, len(script_ref._groups), len(self._entry_widgets))
                 if idx < 0 or idx >= len(script_ref._groups):
-                    return
+                    if self._entry_widgets and not script_ref._groups:
+                        new_group: dict[str, Any] = {
+                            "name": "\u914d\u7f6e\u7ec4 1",
+                            "window": "",
+                            "entries": [],
+                        }
+                        script_ref._groups.append(new_group)
+                        self._current_group_index = 0
+                        self._rebuild_group_combo()
+                        idx = 0
+                        _log.info("_save_current_group: auto-created default group")
+                    else:
+                        _log.info("_save_current_group: SKIPPED (idx out of range)")
+                        return
                 group = script_ref._groups[idx]
                 group["entries"] = [w.to_entry() for w in self._entry_widgets]
                 group["window"] = self._window_edit.text()
+                _log.info("_save_current_group: saved %d entries to group[%d]", len(group["entries"]), idx)
 
             def _on_group_changed(self, index: int) -> None:
                 if index < 0:
@@ -609,6 +644,12 @@ class HotkeyClickScript(ScriptBase):
                 self._pending_timer.start()
 
             def _emit_settings_changed(self) -> None:
+                import logging as _logging
+                _log = _logging.getLogger("platex.scripts.hotkey_click")
+                _log.info("_emit_settings_changed: syncing=%s, callback=%s, groups=%s",
+                          self._syncing,
+                          self._settings_changed_callback is not None,
+                          len(script_ref._groups) if script_ref else -1)
                 if self._syncing:
                     return
                 self._save_current_group()
@@ -616,6 +657,15 @@ class HotkeyClickScript(ScriptBase):
                     self._settings_changed_callback()
 
             def _add_entry(self) -> None:
+                if not script_ref._groups:
+                    new_group: dict[str, Any] = {
+                        "name": "\u914d\u7f6e\u7ec4 1",
+                        "window": "",
+                        "entries": [],
+                    }
+                    script_ref._groups.append(new_group)
+                    self._current_group_index = 0
+                    self._rebuild_group_combo()
                 default_entry = {"hotkey": "", "x": 0, "y": 0, "button": "left", "remark": ""}
                 self._add_entry_with_data(default_entry)
                 self._schedule_settings_changed()
@@ -636,6 +686,12 @@ class HotkeyClickScript(ScriptBase):
                     self._schedule_settings_changed()
 
             def save_settings(self) -> None:
+                import logging as _logging
+                _log = _logging.getLogger("platex.scripts.hotkey_click")
+                _log.info("save_settings: current_group=%s, groups=%s, entries_in_ui=%s",
+                          self._current_group_index,
+                          len(script_ref._groups) if script_ref else -1,
+                          len(self._entry_widgets))
                 self._save_current_group()
 
         settings_widget = _SettingsWidget(parent)

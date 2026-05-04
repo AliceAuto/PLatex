@@ -268,63 +268,31 @@ class TestRestoreApiKey(unittest.TestCase):
 
 
 class TestFillMaskedApiKeys(unittest.TestCase):
-    def setUp(self):
-        clear_all()
-        for key in ("GLM_API_KEY",):
-            os.environ.pop(key, None)
+    """Tests for fill_masked_api_keys(data) — now a simple shallow copy."""
 
-    def tearDown(self):
-        clear_all()
-        for key in ("GLM_API_KEY",):
-            os.environ.pop(key, None)
-
-    def test_fill_masked_glm_api_key(self):
-        set_secret("GLM_API_KEY", "real-key-123")
+    def test_returns_shallow_copy(self):
         data = {"glm_api_key": "********"}
         result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "real-key-123")
+        self.assertEqual(result, data)
+        self.assertIsNot(result, data)
 
-    def test_fill_non_masked_glm_api_key(self):
+    def test_preserves_non_masked_values(self):
         data = {"glm_api_key": "actual-key"}
         result = fill_masked_api_keys(data)
         self.assertEqual(result["glm_api_key"], "actual-key")
 
-    def test_fill_masked_keeps_masked_when_no_secret(self):
+    def test_preserves_masked_values(self):
         data = {"glm_api_key": "********"}
         result = fill_masked_api_keys(data)
         self.assertEqual(result["glm_api_key"], "********")
 
-    def test_fill_partial_mask(self):
-        set_secret("GLM_API_KEY", "real-key-123")
-        data = {"glm_api_key": "sk-1****"}
+    def test_preserves_scripts(self):
+        data = {"glm_api_key": "********", "scripts": {"my_script": {"api_key": "actual-key"}}}
         result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "real-key-123")
+        self.assertEqual(result["glm_api_key"], "********")
+        self.assertEqual(result["scripts"]["my_script"]["api_key"], "actual-key")
 
-    def test_fill_does_not_modify_original(self):
-        set_secret("GLM_API_KEY", "real-key")
-        data = {"glm_api_key": "********"}
-        result = fill_masked_api_keys(data)
-        self.assertEqual(data["glm_api_key"], "********")
-        self.assertEqual(result["glm_api_key"], "real-key")
-
-    def test_fill_with_scripts(self):
-        set_secret("GLM_API_KEY", "real-key")
-        data = {"glm_api_key": "********", "scripts": {"my_script": {"api_key": "********"}}}
-        result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "real-key")
-        self.assertEqual(result["scripts"]["my_script"]["api_key"], "real-key")
-
-    def test_fill_with_non_dict_scripts(self):
-        data = {"scripts": "not_a_dict"}
-        result = fill_masked_api_keys(data)
-        self.assertEqual(result["scripts"], "not_a_dict")
-
-    def test_fill_with_non_dict_script_config(self):
-        data = {"scripts": {"my_script": "not_a_dict"}}
-        result = fill_masked_api_keys(data)
-        self.assertEqual(result["scripts"]["my_script"], "not_a_dict")
-
-    def test_fill_empty_data(self):
+    def test_empty_data(self):
         result = fill_masked_api_keys({})
         self.assertEqual(result, {})
 

@@ -209,12 +209,10 @@ def _apply_migrations(payload: dict[str, Any], from_version: int, to_version: in
         scripts = result["scripts"]
         if "glm_vision_ocr" not in scripts:
             scripts["glm_vision_ocr"] = {
-                "model": result.get("glm_model", "glm-4.1v-thinking-flash"),
-                "base_url": result.get("glm_base_url", "https://open.bigmodel.cn/api/paas/v4/chat/completions"),
                 "enabled": True,
             }
         if "hotkey_click" not in scripts:
-            scripts["hotkey_click"] = {"enabled": True, "entries": []}
+            scripts["hotkey_click"] = {"enabled": True, "groups": []}
 
     return result
 

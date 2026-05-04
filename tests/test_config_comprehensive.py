@@ -461,12 +461,12 @@ class TestAppConfigApplyEnvironment(unittest.TestCase):
         for key in ("GLM_API_KEY", "GLM_MODEL", "GLM_BASE_URL"):
             os.environ.pop(key, None)
 
-    def test_apply_sets_secrets(self):
+    def test_apply_does_not_set_secrets(self):
         cfg = AppConfig(glm_api_key="key1", glm_model="model1", glm_base_url="url1")
         cfg.apply_environment()
-        self.assertEqual(get_secret("GLM_API_KEY"), "key1")
-        self.assertEqual(get_secret("GLM_MODEL"), "model1")
-        self.assertEqual(get_secret("GLM_BASE_URL"), "url1")
+        self.assertFalse(has_secret("GLM_API_KEY"))
+        self.assertFalse(has_secret("GLM_MODEL"))
+        self.assertFalse(has_secret("GLM_BASE_URL"))
 
     def test_apply_does_not_leak_to_environ(self):
         cfg = AppConfig(glm_api_key="secret1", glm_model="model1", glm_base_url="url1")
@@ -504,13 +504,13 @@ class TestAppConfigApplyEnvironment(unittest.TestCase):
         cfg.apply_environment()
         self.assertEqual(os.environ.get("GLM_API_KEY"), "user-set-key")
 
-    def test_apply_all_three_secrets_independently(self):
+    def test_apply_all_three_secrets_not_set(self):
         set_secret("GLM_MODEL", "existing-model")
         cfg = AppConfig(glm_api_key="new-key", glm_model="new-model", glm_base_url="new-url")
         cfg.apply_environment()
-        self.assertEqual(get_secret("GLM_API_KEY"), "new-key")
+        self.assertFalse(has_secret("GLM_API_KEY"))
         self.assertEqual(get_secret("GLM_MODEL"), "existing-model")
-        self.assertEqual(get_secret("GLM_BASE_URL"), "new-url")
+        self.assertFalse(has_secret("GLM_BASE_URL"))
 
 
 class TestConfigStoreSingleton(unittest.TestCase):

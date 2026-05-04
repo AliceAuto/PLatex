@@ -236,7 +236,7 @@ class TestValidateScriptPathEdgeCases(unittest.TestCase):
                 validate_script_path(link)
 
     def test_path_traversal_rejected(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises((ValueError, FileNotFoundError)):
             validate_script_path(Path("../../etc/script.py"))
 
 

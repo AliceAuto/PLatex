@@ -4,13 +4,13 @@ import json
 import logging
 import os
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from .api_key_masking import _is_masked_value, fill_masked_api_keys, hide_api_key, restore_api_key, strip_api_keys
+from .api_key_masking import fill_masked_api_keys, hide_api_key, restore_api_key
 from .config_manager import config_file_path
 
 logger = logging.getLogger("platex.config")
@@ -22,6 +22,7 @@ _fill_masked_api_keys = fill_masked_api_keys
 
 @dataclass(slots=True)
 class AppConfig:
+    config_version: int = 0
     db_path: Path | None = None
     script: Path | None = None
     log_file: Path | None = None
@@ -33,16 +34,10 @@ class AppConfig:
     auto_start: bool = False
     ui_language: str = "en"
     language_pack: str = ""
+    scripts: dict[str, Any] = field(default_factory=dict)
 
     def apply_environment(self) -> None:
-        from .secrets import set_secret, has_secret
-
-        if self.glm_api_key and not _is_masked_value(self.glm_api_key) and not has_secret("GLM_API_KEY"):
-            set_secret("GLM_API_KEY", self.glm_api_key)
-        if self.glm_model and not _is_masked_value(self.glm_model) and not has_secret("GLM_MODEL"):
-            set_secret("GLM_MODEL", self.glm_model)
-        if self.glm_base_url and not _is_masked_value(self.glm_base_url) and not has_secret("GLM_BASE_URL"):
-            set_secret("GLM_BASE_URL", self.glm_base_url)
+        pass
 
 
 def default_config_path() -> Path:
@@ -57,13 +52,7 @@ def default_log_path() -> Path:
 def _candidate_config_paths(config_path: Path | None) -> list[Path]:
     if config_path is not None:
         return [config_path]
-
-    cwd = Path.cwd()
-    return [
-        config_file_path(),
-        cwd / "config.yaml",
-        cwd / "config.example.yaml",
-    ]
+    return [config_file_path()]
 
 
 def _parse_bool(value: object) -> bool:
@@ -106,6 +95,16 @@ def _is_valid_language_code(code: str) -> bool:
 def load_config(config_path: Path | None = None) -> AppConfig:
     path = next((candidate for candidate in _candidate_config_paths(config_path) if candidate.exists()), None)
     if path is None:
+        cfg_path = config_file_path()
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        empty_payload: dict[str, Any] = {"config_version": 0}
+        try:
+            cfg_path.write_text(
+                yaml.safe_dump(empty_payload, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+        except OSError:
+            logger.exception("Failed to create initial config file at %s", cfg_path)
         return AppConfig()
 
     try:
@@ -134,7 +133,18 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         logger.warning("Invalid ui_language '%s' in config, defaulting to 'en'", raw_language)
         raw_language = "en"
 
+    raw_scripts = payload.get("scripts")
+    if not isinstance(raw_scripts, dict):
+        raw_scripts = {}
+
+    raw_config_version = 0
+    try:
+        raw_config_version = int(payload.get("config_version", 0))
+    except (TypeError, ValueError):
+        raw_config_version = 0
+
     return AppConfig(
+        config_version=raw_config_version,
         db_path=_safe_resolve_path(payload.get("db_path", ""), "db_path"),
         script=_safe_resolve_path(payload.get("script", ""), "script"),
         log_file=_safe_resolve_path(payload.get("log_file", ""), "log_file"),
@@ -146,6 +156,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         auto_start=_parse_bool(payload.get("auto_start", False)),
         ui_language=raw_language,
         language_pack=str(payload.get("language_pack", "")),
+        scripts=raw_scripts,
     )
 
 
@@ -171,9 +182,15 @@ class ConfigStore:
         with cls._lock:
             cls._instance = None
 
+    def reload(self) -> None:
+        with self._ops_lock:
+            self.config = load_config()
+            self._disk_payload = self._build_payload_from_config()
+
     def _build_payload_from_config(self) -> dict[str, Any]:
         cfg = self.config
-        return {
+        result: dict[str, Any] = {
+            "config_version": cfg.config_version,
             "db_path": str(cfg.db_path) if cfg.db_path else "",
             "script": str(cfg.script) if cfg.script else "",
             "log_file": str(cfg.log_file) if cfg.log_file else "",
@@ -184,7 +201,10 @@ class ConfigStore:
             "glm_base_url": cfg.glm_base_url or "",
             "auto_start": cfg.auto_start,
             "ui_language": cfg.ui_language,
+            "language_pack": cfg.language_pack,
+            "scripts": cfg.scripts,
         }
+        return result
 
     def build_full_payload(self) -> dict[str, Any]:
         with self._ops_lock:
@@ -192,7 +212,9 @@ class ConfigStore:
 
     def request_update_and_save(self, payload: dict[str, Any]) -> None:
         with self._ops_lock:
-            self._disk_payload.update(payload)
+            from .api_key_masking import fill_masked_api_keys
+            filled_payload = fill_masked_api_keys(payload, self._disk_payload)
+            self._disk_payload.update(filled_payload)
 
             script_val = payload.get("script")
             if isinstance(script_val, str) and script_val.strip():
@@ -243,12 +265,23 @@ class ConfigStore:
             if isinstance(glm_base_url, str):
                 self.config.glm_base_url = glm_base_url
 
+            config_version = payload.get("config_version")
+            if isinstance(config_version, int):
+                self.config.config_version = config_version
+
+            language_pack = payload.get("language_pack")
+            if isinstance(language_pack, str):
+                self.config.language_pack = language_pack
+
+            scripts = payload.get("scripts")
+            if isinstance(scripts, dict):
+                self.config.scripts = scripts
+
             self._save_to_disk()
 
     def _save_to_disk(self) -> None:
         try:
-            disk_payload = strip_api_keys(self._disk_payload)
-            text = yaml.safe_dump(disk_payload, sort_keys=False, allow_unicode=True)
+            text = yaml.safe_dump(self._disk_payload, sort_keys=False, allow_unicode=True)
             cfg_path = config_file_path()
             cfg_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = cfg_path.with_suffix(".yaml.tmp")
@@ -284,5 +317,4 @@ class ConfigStore:
             logger.debug("Failed to set restrictive permissions on config file", exc_info=True)
 
     def build_disk_yaml_text(self) -> str:
-        disk_payload = strip_api_keys(self._disk_payload)
-        return yaml.safe_dump(disk_payload, sort_keys=False, allow_unicode=True)
+        return yaml.safe_dump(self._disk_payload, sort_keys=False, allow_unicode=True)

@@ -64,6 +64,15 @@ class TestPlatexAppCreation(unittest.TestCase):
             )
             self.assertFalse(app.isolate_mode)
 
+    def test_isolate_mode_enabled(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = PlatexApp(
+                db_path=Path(temp_dir) / "test.sqlite3",
+                script_path=Path(temp_dir) / "test_script.py",
+                isolate_mode=True,
+            )
+            self.assertTrue(app.isolate_mode)
+
 
 class TestPlatexAppStartStop(unittest.TestCase):
     def setUp(self):
@@ -132,6 +141,23 @@ class TestPlatexAppStartStop(unittest.TestCase):
             app.stop()
             self.assertTrue(app.state in (AppState.STOPPED, AppState.IDLE))
 
+    def test_start_isolate_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = PlatexApp(
+                db_path=Path(temp_dir) / "test.sqlite3",
+                script_path=Path(temp_dir) / "test_script.py",
+                isolate_mode=True,
+            )
+            Path(temp_dir, "test_script.py").write_text(
+                "def process_image(image_bytes, context):\n    return 'test'\n",
+                encoding="utf-8",
+            )
+            app.start()
+            try:
+                self.assertTrue(app.is_running)
+            finally:
+                app.stop()
+
 
 class TestPlatexAppSetWatcherPublishing(unittest.TestCase):
     def setUp(self):
@@ -176,33 +202,6 @@ class TestPlatexAppSetExternalHistory(unittest.TestCase):
             app.set_external_history(history)
             self.assertIs(app._external_history, history)
             history.close()
-
-
-class TestPlatexAppRunOnce(unittest.TestCase):
-    def setUp(self):
-        ConfigStore.reset()
-        clear_all()
-        reset_event_bus()
-
-    def tearDown(self):
-        ConfigStore.reset()
-        clear_all()
-        reset_event_bus()
-
-    def test_run_once_no_watcher(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            script_path = Path(temp_dir) / "test_script.py"
-            script_path.write_text(
-                "def process_image(image_bytes, context):\n    return 'test'\n",
-                encoding="utf-8",
-            )
-            app = PlatexApp(
-                db_path=Path(temp_dir) / "test.sqlite3",
-                script_path=script_path,
-            )
-            with patch("platex_client.watcher.grab_image_clipboard", return_value=None):
-                result = app.run_once()
-            self.assertIsNone(result)
 
 
 class TestPlatexAppRestartWatcher(unittest.TestCase):
@@ -280,6 +279,39 @@ class TestPlatexAppRestartWatcher(unittest.TestCase):
             app.restart_watcher(interval=100.0)
             self.assertLessEqual(app.interval, 60.0)
             app.stop()
+
+
+class TestPlatexAppRunOnce(unittest.TestCase):
+    def setUp(self):
+        ConfigStore.reset()
+        clear_all()
+        reset_event_bus()
+
+    def tearDown(self):
+        ConfigStore.reset()
+        clear_all()
+        reset_event_bus()
+
+    def test_run_once_no_clipboard_image(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script_path = Path(temp_dir) / "test_script.py"
+            script_path.write_text(
+                "def process_image(image_bytes, context):\n    return 'test'\n",
+                encoding="utf-8",
+            )
+            db_path = Path(temp_dir) / "test2.sqlite3"
+            app = PlatexApp(
+                db_path=db_path,
+                script_path=script_path,
+            )
+            try:
+                with patch("platex_client.watcher.grab_image_clipboard", return_value=None):
+                    result = app.run_once()
+                self.assertIsNone(result)
+            finally:
+                if app._watcher is not None:
+                    app._watcher.close()
+                    app._watcher = None
 
 
 if __name__ == "__main__":

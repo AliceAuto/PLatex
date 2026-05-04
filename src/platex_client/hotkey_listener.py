@@ -24,11 +24,14 @@ def convert_hotkey_str(hotkey: str) -> str:
 
     modifiers = {
         "ctrl": "<ctrl>",
+        "control": "<ctrl>",
         "alt": "<alt>",
         "shift": "<shift>",
         "win": "<cmd>",
         "cmd": "<cmd>",
         "super": "<cmd>",
+        "meta": "<cmd>",
+        "windows": "<cmd>",
     }
     special_keys = {
         "space": "<space>",
@@ -244,10 +247,6 @@ def convert_hotkey_str(hotkey: str) -> str:
         "massyo": "<massyo>",
     }
 
-    hotkey = hotkey.split(",", 1)[0].strip()
-    if hotkey.endswith("+"):
-        raise ValueError(f"Trailing '+' in hotkey string: {hotkey!r}")
-
     _MULTI_WORD_KEYS = [
         "page up", "page down", "caps lock", "num lock", "number lock",
         "scroll lock", "print screen", "system request", "volume down",
@@ -277,37 +276,34 @@ def convert_hotkey_str(hotkey: str) -> str:
         "multiple candidate", "previous candidate", "number lock",
         "add favorite", "hot links", "light bulb",
         "touchpad toggle", "touchpad on", "touchpad off",
+        "browser back", "browser forward", "browser refresh",
+        "browser stop", "browser search", "browser favorites",
+        "browser home", "zoom in", "zoom out",
     ]
 
     normalized = hotkey.lower()
     for mw in _MULTI_WORD_KEYS:
         normalized = normalized.replace(mw, mw.replace(" ", "_"))
 
-    _SPECIAL_CHARS = {"+", "=", "-", ","}
-    raw_parts: list[str] = []
-    current = []
-    i = 0
-    while i < len(normalized):
-        ch = normalized[i]
-        if ch == "+":
-            if current:
-                raw_parts.append("".join(current))
-                current = []
-            elif raw_parts and not raw_parts[-1]:
-                raw_parts[-1] = "+"
-                i += 1
-                continue
-            else:
-                raw_parts.append("")
-        else:
-            current.append(ch)
-        i += 1
-    if current:
-        raw_parts.append("".join(current))
+    _COMMA_KEY_PH = "\x00CK\x00"
+    _PLUS_KEY_PH = "\x00PK\x00"
 
-    parts = [p for p in raw_parts if p]
-    if not parts:
-        raise ValueError(f"Invalid hotkey string: {hotkey!r}")
+    normalized = normalized.replace("+,", _COMMA_KEY_PH)
+
+    normalized = normalized.split(",", 1)[0].strip()
+
+    normalized = normalized.replace(_COMMA_KEY_PH, "+,")
+
+    while "++" in normalized:
+        normalized = normalized.replace("++", "+" + _PLUS_KEY_PH)
+
+    if normalized.endswith("+"):
+        raise ValueError(f"Trailing '+' in hotkey string: {hotkey!r}")
+
+    parts = normalized.split("+")
+    parts = [p.replace(_PLUS_KEY_PH, "+").replace(_COMMA_KEY_PH, ",") for p in parts]
+
+    _SPECIAL_CHARS = {"+", "=", "-", ","}
 
     converted: list[str] = []
     for part in parts:
@@ -499,10 +495,13 @@ class HotkeyListener:
             self._batch_depth = max(0, self._batch_depth - 1)
         if self._running:
             self._rebuild_listener()
+            self._rebuild_passthrough()
 
     def register_passthrough(self, hotkey: str, callback: Callable[[], None]) -> bool:
         with self._lock:
             self._passthrough_bindings[hotkey] = callback
+            if self._batch_depth > 0:
+                return True
         if self._running:
             self._rebuild_passthrough()
         return True
@@ -510,6 +509,8 @@ class HotkeyListener:
     def unregister_passthrough(self, hotkey: str) -> None:
         with self._lock:
             self._passthrough_bindings.pop(hotkey, None)
+            if self._batch_depth > 0:
+                return
         if self._running:
             self._rebuild_passthrough()
 

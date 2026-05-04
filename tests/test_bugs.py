@@ -17,7 +17,8 @@ class TestBug1_ApplyEnvironmentLeaksSecretsToOSEnviron(unittest.TestCase):
 
     修复前：apply_environment() 同时调用了 set_secret() 和
     os.environ[...] = ...，导致密钥泄露到环境变量。
-    修复后：密钥仅存入内存 secrets 模块，不再写入 os.environ。
+    修复后：apply_environment() 是 no-op，不再调用 set_secret()
+    也不修改 os.environ。
     """
 
     def setUp(self):
@@ -37,26 +38,26 @@ class TestBug1_ApplyEnvironmentLeaksSecretsToOSEnviron(unittest.TestCase):
         cfg.apply_environment()
         self.assertIsNone(os.environ.get("GLM_API_KEY"),
                           "FIXED: apply_environment() 不再将 API 密钥泄露到 os.environ")
-        self.assertEqual(get_secret("GLM_API_KEY"), "secret-key-12345",
-                         "密钥应存入 secrets 模块")
+        self.assertFalse(has_secret("GLM_API_KEY"),
+                         "apply_environment() 是 no-op，不再设置 secret")
 
     def test_model_not_leaked_to_os_environ(self):
         cfg = AppConfig(glm_model="glm-4")
         cfg.apply_environment()
         self.assertIsNone(os.environ.get("GLM_MODEL"),
                           "FIXED: apply_environment() 不再将模型名泄露到 os.environ")
-        self.assertEqual(get_secret("GLM_MODEL"), "glm-4",
-                         "模型名应存入 secrets 模块")
+        self.assertFalse(has_secret("GLM_MODEL"),
+                         "apply_environment() 是 no-op，不再设置 secret")
 
     def test_base_url_not_leaked_to_os_environ(self):
         cfg = AppConfig(glm_base_url="https://api.test.com")
         cfg.apply_environment()
         self.assertIsNone(os.environ.get("GLM_BASE_URL"),
                           "FIXED: apply_environment() 不再将 base URL 泄露到 os.environ")
-        self.assertEqual(get_secret("GLM_BASE_URL"), "https://api.test.com",
-                         "base URL 应存入 secrets 模块")
+        self.assertFalse(has_secret("GLM_BASE_URL"),
+                         "apply_environment() 是 no-op，不再设置 secret")
 
-    def test_secrets_stored_in_memory_not_environ(self):
+    def test_secrets_not_stored_after_apply(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.yaml"
             config_path.write_text("glm_api_key: secret-key-12345\n", encoding="utf-8")
@@ -64,15 +65,15 @@ class TestBug1_ApplyEnvironmentLeaksSecretsToOSEnviron(unittest.TestCase):
             config.apply_environment()
             self.assertIsNone(os.environ.get("GLM_API_KEY"),
                               "FIXED: 密钥不再泄露到 os.environ")
-            self.assertEqual(get_secret("GLM_API_KEY"), "secret-key-12345",
-                             "密钥应存入 secrets 模块")
+            self.assertFalse(has_secret("GLM_API_KEY"),
+                             "apply_environment() 是 no-op，不再设置 secret")
 
 
 class TestBug2_ApplyEnvironmentOverwritesExistingOSEnviron(unittest.TestCase):
     """BUG #2 [严重] → FIXED: apply_environment() 不再操作 os.environ
 
     修复前：apply_environment() 会覆盖 os.environ 中已有的值。
-    修复后：密钥仅存入内存 secrets 模块，不影响 os.environ。
+    修复后：apply_environment() 是 no-op，不影响 os.environ。
     """
 
     def setUp(self):
@@ -331,7 +332,7 @@ class TestOriginalTestFailures(unittest.TestCase):
             os.environ.pop(key, None)
 
     def test_secrets_not_in_environ_after_fix(self):
-        """修复后：密钥不再泄露到 os.environ，仅存入 secrets 模块"""
+        """修复后：apply_environment() 是 no-op，密钥不再泄露到 os.environ，也不设置 secrets"""
         with tempfile.TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "config.yaml"
             config_path.write_text(
@@ -343,8 +344,8 @@ class TestOriginalTestFailures(unittest.TestCase):
             config.apply_environment()
             self.assertIsNone(os.environ.get("GLM_API_KEY"),
                               "FIXED: 密钥不再泄露到 os.environ")
-            self.assertEqual(get_secret("GLM_API_KEY"), "yaml-key",
-                             "密钥应存入 secrets 模块")
+            self.assertFalse(has_secret("GLM_API_KEY"),
+                             "apply_environment() 是 no-op，不再设置 secret")
 
 
 if __name__ == "__main__":

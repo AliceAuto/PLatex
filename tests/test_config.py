@@ -270,21 +270,11 @@ class TestAppConfigDefaults(unittest.TestCase):
 
 
 class TestAppConfigApplyEnvironment(unittest.TestCase):
-    def setUp(self):
-        clear_all()
-        for key in ("GLM_API_KEY", "GLM_MODEL", "GLM_BASE_URL"):
-            os.environ.pop(key, None)
-
-    def tearDown(self):
-        clear_all()
-        for key in ("GLM_API_KEY", "GLM_MODEL", "GLM_BASE_URL"):
-            os.environ.pop(key, None)
-
-    def test_apply_sets_secrets(self):
+    def test_apply_is_noop(self):
         cfg = AppConfig(glm_api_key="test-key")
         cfg.apply_environment()
-        from platex_client.secrets import get_secret
-        self.assertEqual(get_secret("GLM_API_KEY"), "test-key")
+        from platex_client.secrets import has_secret
+        self.assertFalse(has_secret("GLM_API_KEY"))
 
     def test_apply_does_not_leak_to_environ(self):
         cfg = AppConfig(glm_api_key="secret1", glm_model="model1", glm_base_url="https://api.test.com")
@@ -292,25 +282,6 @@ class TestAppConfigApplyEnvironment(unittest.TestCase):
         self.assertIsNone(os.environ.get("GLM_API_KEY"))
         self.assertIsNone(os.environ.get("GLM_MODEL"))
         self.assertIsNone(os.environ.get("GLM_BASE_URL"))
-
-    def test_apply_none_values(self):
-        cfg = AppConfig()
-        cfg.apply_environment()
-        from platex_client.secrets import has_secret
-        self.assertFalse(has_secret("GLM_API_KEY"))
-
-    def test_apply_does_not_overwrite_existing_secret(self):
-        from platex_client.secrets import set_secret, get_secret
-        set_secret("GLM_API_KEY", "existing")
-        cfg = AppConfig(glm_api_key="new")
-        cfg.apply_environment()
-        self.assertEqual(get_secret("GLM_API_KEY"), "existing")
-
-    def test_apply_masked_value_skipped(self):
-        cfg = AppConfig(glm_api_key="********")
-        cfg.apply_environment()
-        from platex_client.secrets import has_secret
-        self.assertFalse(has_secret("GLM_API_KEY"))
 
 
 class TestConfigStoreSingleton(unittest.TestCase):

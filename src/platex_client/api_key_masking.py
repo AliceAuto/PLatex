@@ -55,62 +55,74 @@ def restore_api_key(edited_text: str, original_text: str) -> str:
     edited_lines = edited_text.split("\n")
     original_lines = original_text.split("\n")
     result_lines: list[str] = []
+
+    def _path_for_line(line: str) -> str:
+        m = re.match(rf'^(\s*)({_SENSITIVE_KEY_PATTERN})\s*:', line)
+        if not m:
+            return ""
+        indent = len(m.group(1))
+        key = m.group(2)
+        return f"{indent}:{key}"
+
     orig_key_values: dict[str, list[str]] = {}
     for line in original_lines:
-        m = re.match(rf'^\s*({_SENSITIVE_KEY_PATTERN})\s*:\s*(.+)$', line)
-        if m:
-            key_name = m.group(1)
-            val = m.group(2).strip()
-            orig_key_values.setdefault(key_name, []).append(val)
+        path = _path_for_line(line)
+        if path:
+            m = re.match(rf'^\s*{_SENSITIVE_KEY_PATTERN}\s*:\s*(.+)$', line)
+            if m:
+                val = m.group(1).strip()
+                orig_key_values.setdefault(path, []).append(val)
 
     orig_key_cursors: dict[str, int] = {}
     for line in edited_lines:
-        m = re.match(rf'^(\s*{_SENSITIVE_KEY_PATTERN}\s*:\s*)(.+)$', line)
-        if m:
-            prefix = m.group(1)
-            val = m.group(2).strip()
-            key_name_match = re.match(rf'^\s*({_SENSITIVE_KEY_PATTERN})', prefix.strip())
-            key_name_str = key_name_match.group(1) if key_name_match else "api_key"
-            if _is_masked_value(val) and key_name_str in orig_key_values:
-                idx = orig_key_cursors.get(key_name_str, 0)
-                values = orig_key_values[key_name_str]
-                if idx < len(values):
-                    result_lines.append(prefix + values[idx])
-                    orig_key_cursors[key_name_str] = idx + 1
-                else:
-                    result_lines.append(line)
-            else:
-                result_lines.append(line)
-        else:
-            result_lines.append(line)
+        path = _path_for_line(line)
+        if path and path in orig_key_values:
+            m = re.match(rf'^(\s*{_SENSITIVE_KEY_PATTERN}\s*:\s*)(.+)$', line)
+            if m:
+                prefix = m.group(1)
+                val = m.group(2).strip()
+                if _is_masked_value(val):
+                    idx = orig_key_cursors.get(path, 0)
+                    values = orig_key_values[path]
+                    if idx < len(values):
+                        result_lines.append(prefix + values[idx])
+                        orig_key_cursors[path] = idx + 1
+                        continue
+        result_lines.append(line)
     result = "\n".join(result_lines)
     if original_text.endswith("\n") and not result.endswith("\n"):
         result += "\n"
     return result
 
 
-def fill_masked_api_keys(data: dict[str, Any]) -> dict[str, Any]:
-    from .secrets import get_secret
-    env_key = get_secret("GLM_API_KEY", os.getenv("GLM_API_KEY", ""))
-    data = dict(data)
-    if isinstance(data.get("glm_api_key"), str):
-        val = data["glm_api_key"]
-        if _is_masked_value(val):
-            if env_key:
-                data["glm_api_key"] = env_key
-    scripts = data.get("scripts")
-    if isinstance(scripts, dict):
-        new_scripts = {}
-        for name, cfg in scripts.items():
-            if isinstance(cfg, dict):
-                new_cfg = dict(cfg)
-                ak = new_cfg.get("api_key", "")
-                if isinstance(ak, str) and _is_masked_value(ak):
-                    script_env = get_secret(f"PLATEX_API_KEY_{name.upper()}", os.getenv(f"PLATEX_API_KEY_{name.upper()}", env_key))
-                    if script_env:
-                        new_cfg["api_key"] = script_env
-                new_scripts[name] = new_cfg
-            else:
-                new_scripts[name] = cfg
-        data["scripts"] = new_scripts
-    return data
+def fill_masked_api_keys(data: dict[str, Any], real_values: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = copy.deepcopy(data)
+    if real_values is None:
+        return result
+
+    def _is_masked(val: Any) -> bool:
+        if not isinstance(val, str):
+            return False
+        return val.startswith("*") or bool(re.match(r"^.{1,4}\*+$", val))
+
+    def _fill(obj: Any, ref: Any) -> None:
+        if isinstance(obj, dict) and isinstance(ref, dict):
+            keys_to_remove: list[str] = []
+            for k in obj:
+                if k in ref:
+                    if _is_masked(obj[k]):
+                        if _is_masked(ref[k]):
+                            keys_to_remove.append(k)
+                        else:
+                            obj[k] = copy.deepcopy(ref[k])
+                    elif _is_masked(ref[k]) and not _is_masked(obj[k]):
+                        pass
+                    else:
+                        _fill(obj[k], ref[k])
+                elif _is_masked(obj[k]):
+                    keys_to_remove.append(k)
+            for k in keys_to_remove:
+                del obj[k]
+
+    _fill(result, real_values)
+    return result

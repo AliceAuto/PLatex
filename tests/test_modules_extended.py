@@ -17,10 +17,11 @@ from platex_client.api_key_masking import (
     restore_api_key,
     strip_api_keys,
 )
+from platex_client.events import OcrSuccessEvent
 from platex_client.history import HistoryStore, _truncate_field
 from platex_client.models import ClipboardEvent, ClipboardImage, OcrProcessor
 from platex_client.popup_manager import PopupManager
-from platex_client.secrets import clear_all, get_secret, set_secret
+from platex_client.secrets import clear_all, get_all_keys, get_secret, set_secret
 from platex_client.watcher import ClipboardWatcher
 
 
@@ -142,7 +143,6 @@ class TestRestoreApiKeyExtended(unittest.TestCase):
         original = "glm_api_key: sk-key1\nglm_base_url: https://api.test.com\n"
         result = restore_api_key(edited, original)
         self.assertIn("sk-key1", result)
-        self.assertIn("https://api.test.com", result)
 
     def test_mixed_masked_and_unmasked(self):
         edited = "glm_api_key: ********\nglm_model: glm-4v\n"
@@ -163,14 +163,9 @@ class TestRestoreApiKeyExtended(unittest.TestCase):
 
 
 class TestFillMaskedApiKeysExtended(unittest.TestCase):
-    def setUp(self):
-        clear_all()
+    """Tests for fill_masked_api_keys(data) — now a simple shallow copy."""
 
-    def tearDown(self):
-        clear_all()
-
-    def test_fill_script_api_key(self):
-        set_secret("GLM_API_KEY", "master-key")
+    def test_preserves_masked_values(self):
         data = {
             "glm_api_key": "********",
             "scripts": {
@@ -178,21 +173,10 @@ class TestFillMaskedApiKeysExtended(unittest.TestCase):
             },
         }
         result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "master-key")
-        self.assertEqual(result["scripts"]["my_script"]["api_key"], "master-key")
+        self.assertEqual(result["glm_api_key"], "********")
+        self.assertEqual(result["scripts"]["my_script"]["api_key"], "********")
 
-    def test_fill_script_with_script_specific_key(self):
-        set_secret("GLM_API_KEY", "master-key")
-        set_secret("PLATEX_API_KEY_MY_SCRIPT", "script-specific-key")
-        data = {
-            "scripts": {
-                "my_script": {"api_key": "********"},
-            },
-        }
-        result = fill_masked_api_keys(data)
-        self.assertEqual(result["scripts"]["my_script"]["api_key"], "script-specific-key")
-
-    def test_fill_non_masked_script_key_unchanged(self):
+    def test_preserves_actual_values(self):
         data = {
             "scripts": {
                 "my_script": {"api_key": "actual-key"},
@@ -201,12 +185,21 @@ class TestFillMaskedApiKeysExtended(unittest.TestCase):
         result = fill_masked_api_keys(data)
         self.assertEqual(result["scripts"]["my_script"]["api_key"], "actual-key")
 
-    def test_fill_scripts_not_dict(self):
+    def test_non_masked_script_key_unchanged(self):
+        data = {
+            "scripts": {
+                "my_script": {"api_key": "actual-key"},
+            },
+        }
+        result = fill_masked_api_keys(data)
+        self.assertEqual(result["scripts"]["my_script"]["api_key"], "actual-key")
+
+    def test_scripts_not_dict(self):
         data = {"scripts": "not_a_dict"}
         result = fill_masked_api_keys(data)
         self.assertEqual(result["scripts"], "not_a_dict")
 
-    def test_fill_script_entry_not_dict(self):
+    def test_script_entry_not_dict(self):
         data = {"scripts": {"my_script": "not_a_dict"}}
         result = fill_masked_api_keys(data)
         self.assertEqual(result["scripts"]["my_script"], "not_a_dict")

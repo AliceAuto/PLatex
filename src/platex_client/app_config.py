@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,7 @@ logger = logging.getLogger("platex.config")
 
 @dataclass(slots=True)
 class AppConfig:
+    config_version: int = 0
     db_path: Path | None = None
     script: Path | None = None
     log_file: Path | None = None
@@ -24,17 +25,7 @@ class AppConfig:
     auto_start: bool = False
     ui_language: str = "en"
     language_pack: str = ""
-
-    def apply_environment(self) -> None:
-        from .api_key_masking import _is_masked_value
-        from .secrets import set_secret, has_secret
-
-        if self.glm_api_key and not _is_masked_value(self.glm_api_key) and not has_secret("GLM_API_KEY"):
-            set_secret("GLM_API_KEY", self.glm_api_key)
-        if self.glm_model and not _is_masked_value(self.glm_model) and not has_secret("GLM_MODEL"):
-            set_secret("GLM_MODEL", self.glm_model)
-        if self.glm_base_url and not _is_masked_value(self.glm_base_url) and not has_secret("GLM_BASE_URL"):
-            set_secret("GLM_BASE_URL", self.glm_base_url)
+    scripts: dict[str, Any] = field(default_factory=dict)
 
 
 def parse_bool(value: object) -> bool:
@@ -65,7 +56,18 @@ def parse_payload_to_app_config(payload: dict[str, Any]) -> AppConfig:
     script = _validate_config_path(payload["script"], "script") if isinstance(payload.get("script"), str) and payload["script"].strip() else None
     log_file = _validate_config_path(payload["log_file"], "log_file") if isinstance(payload.get("log_file"), str) and payload["log_file"].strip() else None
 
+    raw_scripts = payload.get("scripts")
+    if not isinstance(raw_scripts, dict):
+        raw_scripts = {}
+
+    raw_config_version = 0
+    try:
+        raw_config_version = int(payload.get("config_version", 0))
+    except (TypeError, ValueError):
+        raw_config_version = 0
+
     return AppConfig(
+        config_version=raw_config_version,
         db_path=db_path,
         script=script,
         log_file=log_file,
@@ -77,6 +79,7 @@ def parse_payload_to_app_config(payload: dict[str, Any]) -> AppConfig:
         auto_start=parse_bool(payload.get("auto_start", False)),
         ui_language=str(payload.get("ui_language", "en")),
         language_pack=str(payload.get("language_pack", "")),
+        scripts=raw_scripts,
     )
 
 
@@ -98,6 +101,7 @@ def load_file_payload(path: Path) -> dict[str, Any]:
 
 def app_config_to_dict(cfg: AppConfig) -> dict[str, Any]:
     result: dict[str, Any] = {}
+    result["config_version"] = cfg.config_version
     if cfg.db_path is not None:
         result["db_path"] = str(cfg.db_path)
     if cfg.script is not None:
@@ -114,8 +118,8 @@ def app_config_to_dict(cfg: AppConfig) -> dict[str, Any]:
         result["glm_base_url"] = cfg.glm_base_url
     result["auto_start"] = cfg.auto_start
     result["ui_language"] = cfg.ui_language
-    if cfg.language_pack is not None:
-        result["language_pack"] = cfg.language_pack
+    result["language_pack"] = cfg.language_pack
+    result["scripts"] = cfg.scripts
     return result
 
 

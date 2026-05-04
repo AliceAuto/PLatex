@@ -133,7 +133,7 @@ def _load_panel_config(default_script: Path) -> dict[str, Any]:
         "auto_start": cfg.auto_start,
         "ui_language": cfg.ui_language,
         "language_pack": cfg.language_pack,
-        "scripts": {},
+        "scripts": cfg.scripts,
     }
 
 
@@ -144,19 +144,12 @@ def _save_panel_config(payload: dict[str, Any]) -> None:
 
 
 def _ensure_scripts_in_config(script_configs: dict[str, dict[str, Any]]) -> None:
-    path = _panel_config_path()
-    payload: dict[str, Any] = {}
-    if path.exists():
-        try:
-            loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                payload = loaded
-        except Exception:
-            payload = {}
-    if "scripts" not in payload:
+    from .config import ConfigStore
+    store = ConfigStore.instance()
+    payload = store.build_full_payload()
+    if "scripts" not in payload or not payload["scripts"]:
         payload["scripts"] = script_configs
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True), encoding="utf-8")
+        store.request_update_and_save(payload)
         logger.info("Added scripts section to config file")
 
 
@@ -478,6 +471,26 @@ class TrayController:
                     return
                 _quit_started = True
             logger.info("Tray exit requested")
+            try:
+                script_configs = self.app.registry.save_configs()
+                store_payload = _load_panel_config(self.app.script_path)
+                store_payload["scripts"] = script_configs
+                ocr_entries = self.app.registry.get_ocr_scripts()
+                for entry in ocr_entries:
+                    ocr_config = entry.script.save_config()
+                    api_key_val = ocr_config.get("api_key")
+                    if api_key_val and not api_key_val.startswith("*"):
+                        store_payload["glm_api_key"] = api_key_val
+                    model_val = ocr_config.get("model")
+                    if model_val:
+                        store_payload["glm_model"] = model_val
+                    base_url_val = ocr_config.get("base_url")
+                    if base_url_val:
+                        store_payload["glm_base_url"] = base_url_val
+                _save_panel_config(store_payload)
+                logger.info("Flushed config to disk before exit")
+            except Exception:
+                logger.exception("Failed to flush config before exit")
             popup_manager.request_shutdown()
             try:
                 threading.Thread(target=icon.stop, daemon=True).start()

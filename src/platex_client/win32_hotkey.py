@@ -93,7 +93,7 @@ class Win32HotkeyListener:
         self._wnd_proc_ref: Any = None
         self._wndproc_type: Any = None
 
-    _MODIFIER_NAMES = {"ctrl", "control", "alt", "shift", "win", "cmd", "super"}
+    _MODIFIER_NAMES = {"ctrl", "control", "alt", "shift", "win", "cmd", "super", "windows", "meta"}
 
     def _parse_hotkey(self, hotkey: str) -> tuple[int, int] | None:
         parts = hotkey.lower().replace("<", "").replace(">", "").split("+")
@@ -115,7 +115,7 @@ class Win32HotkeyListener:
                 modifiers |= MOD_ALT
             elif mod == "shift":
                 modifiers |= MOD_SHIFT
-            elif mod in ("win", "cmd", "super"):
+            elif mod in ("win", "cmd", "super", "windows", "meta"):
                 modifiers |= MOD_WIN
 
         vk_map = {
@@ -548,7 +548,7 @@ def _parse_hotkey_to_vk(hotkey: str) -> tuple[int, int] | None:
     modifiers = 0
     key_part = parts[-1]
 
-    _MODIFIER_NAMES = {"ctrl", "control", "alt", "shift", "win", "cmd", "super"}
+    _MODIFIER_NAMES = {"ctrl", "control", "alt", "shift", "win", "cmd", "super", "windows", "meta"}
     if key_part in _MODIFIER_NAMES:
         return None
 
@@ -559,7 +559,7 @@ def _parse_hotkey_to_vk(hotkey: str) -> tuple[int, int] | None:
             modifiers |= MOD_ALT
         elif mod == "shift":
             modifiers |= MOD_SHIFT
-        elif mod in ("win", "cmd", "super"):
+        elif mod in ("win", "cmd", "super", "windows", "meta"):
             modifiers |= MOD_WIN
 
     vk_map = {
@@ -573,8 +573,11 @@ def _parse_hotkey_to_vk(hotkey: str) -> tuple[int, int] | None:
         "z": 0x5A,
         "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74,
         "f6": 0x75, "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79,
-        "f11": 0x7A, "f12": 0x7B,
+        "f11": 0x7A, "f12": 0x7B, "f13": 0x7C, "f14": 0x7D, "f15": 0x7E,
+        "f16": 0x7F, "f17": 0x80, "f18": 0x81, "f19": 0x82, "f20": 0x83,
+        "f21": 0x84, "f22": 0x85, "f23": 0x86, "f24": 0x87,
         "space": 0x20, "enter": 0x0D, "return": 0x0D, "tab": 0x09,
+        "backtab": 0x09,
         "escape": 0x1B, "esc": 0x1B, "backspace": 0x08, "delete": 0x2E,
         "del": 0x2E, "insert": 0x2D, "ins": 0x2D, "home": 0x24, "end": 0x23,
         "page_up": 0x21, "prior": 0x21, "pgup": 0x21,
@@ -585,10 +588,20 @@ def _parse_hotkey_to_vk(hotkey: str) -> tuple[int, int] | None:
         "scroll_lock": 0x91, "scrolllock": 0x91,
         "pause": 0x13, "break": 0x13,
         "num_lock": 0x90, "numlock": 0x90,
-        "menu": 0x5D,
+        "menu": 0x5D, "help": 0x2F, "clear": 0x0C, "print": 0x2C,
         "numpad0": 0x60, "numpad1": 0x61, "numpad2": 0x62,
         "numpad3": 0x63, "numpad4": 0x64, "numpad5": 0x65, "numpad6": 0x66,
         "numpad7": 0x67, "numpad8": 0x68, "numpad9": 0x69,
+        "multiply": 0x6A, "add": 0x6B, "separator": 0x6C, "subtract": 0x6D,
+        "decimal": 0x6E, "divide": 0x6F,
+        "volume_down": 0xAE, "volume_mute": 0xAD, "volume_up": 0xAF,
+        "media_next": 0xB0, "media_prev": 0xB1, "media_stop": 0xB2,
+        "media_play_pause": 0xB3, "media_play": 0xB3,
+        "launch_mail": 0xB4, "launch_media": 0xB5,
+        "browser_back": 0xA6, "browser_forward": 0xA7,
+        "browser_refresh": 0xA8, "browser_stop": 0xA9,
+        "browser_search": 0xAA, "browser_favorites": 0xAB,
+        "browser_home": 0xAC,
         ";": 0xBA, "=": 0xBB, ",": 0xBC, "-": 0xBD, ".": 0xBE, "/": 0xBF,
         "`": 0xC0, "[": 0xDB, "\\": 0xDC, "]": 0xDD, "'": 0xDE,
     }

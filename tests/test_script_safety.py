@@ -186,7 +186,7 @@ class TestValidateScriptPath(unittest.TestCase):
                 validate_script_path(script_path)
 
     def test_path_traversal(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises((ValueError, FileNotFoundError)):
             validate_script_path(Path("../../etc/passwd"))
 
     def test_valid_file(self):

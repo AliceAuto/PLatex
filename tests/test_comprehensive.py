@@ -819,12 +819,12 @@ class TestAppConfigExtended(unittest.TestCase):
         self.assertEqual(cfg.ui_language, "en")
         self.assertEqual(cfg.language_pack, "")
 
-    def test_apply_environment_sets_secrets(self):
+    def test_apply_environment_does_not_set_secrets(self):
         cfg = AppConfig(glm_api_key="key1", glm_model="model1", glm_base_url="url1")
         cfg.apply_environment()
-        self.assertEqual(get_secret("GLM_API_KEY"), "key1")
-        self.assertEqual(get_secret("GLM_MODEL"), "model1")
-        self.assertEqual(get_secret("GLM_BASE_URL"), "url1")
+        self.assertFalse(has_secret("GLM_API_KEY"))
+        self.assertFalse(has_secret("GLM_MODEL"))
+        self.assertFalse(has_secret("GLM_BASE_URL"))
 
     def test_apply_environment_no_leak_to_os_environ(self):
         cfg = AppConfig(glm_api_key="secret1")
@@ -999,7 +999,7 @@ class TestConfigLoadExtended(unittest.TestCase):
             cfg = load_config(cfg_path)
             cfg.apply_environment()
             self.assertEqual(cfg.interval, 1.25)
-            self.assertEqual(get_secret("GLM_API_KEY"), "yaml-key")
+            self.assertFalse(has_secret("GLM_API_KEY"))
 
     def test_load_json_config(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1881,10 +1881,9 @@ class TestApiKeyMaskingExtended(unittest.TestCase):
         self.assertIn("sk-1234567890", result)
 
     def test_fill_masked_api_keys(self):
-        set_secret("GLM_API_KEY", "real-key-123")
         data = {"glm_api_key": "********"}
         result = fill_masked_api_keys(data)
-        self.assertEqual(result["glm_api_key"], "real-key-123")
+        self.assertEqual(result["glm_api_key"], "********")
 
     def test_fill_non_masked_keeps_value(self):
         data = {"glm_api_key": "actual-key"}
@@ -1898,10 +1897,9 @@ class TestApiKeyMaskingExtended(unittest.TestCase):
         self.assertEqual(result["glm_api_key"], "********")
 
     def test_fill_masked_scripts(self):
-        set_secret("GLM_API_KEY", "global-key")
-        data = {"scripts": {"my_script": {"api_key": "********"}}}
+        data = {"scripts": {"my_script": {"api_key": "actual-key"}}}
         result = fill_masked_api_keys(data)
-        self.assertNotEqual(result["scripts"]["my_script"]["api_key"], "********")
+        self.assertEqual(result["scripts"]["my_script"]["api_key"], "actual-key")
 
 
 class TestScriptSafetyExtended(unittest.TestCase):

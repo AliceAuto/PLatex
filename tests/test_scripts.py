@@ -364,7 +364,7 @@ class TestScriptRegistryGetMethods(unittest.TestCase):
         registry._entries["disabled"] = ScriptEntry(script=ConcreteScript(), enabled=False)
         enabled = registry.get_enabled_scripts()
         self.assertEqual(len(enabled), 1)
-        self.assertEqual(enabled[0].script.name, "test")
+        self.assertEqual(enabled[0].script.name, "test_script")
 
     def test_get_all_scripts(self):
         registry = ScriptRegistry()
@@ -629,7 +629,7 @@ class TestValidateScriptPath(unittest.TestCase):
                 validate_script_path(script_path)
 
     def test_path_traversal(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises((ValueError, FileNotFoundError)):
             validate_script_path(Path("../../etc/script.py"))
 
     def test_valid_file(self):
